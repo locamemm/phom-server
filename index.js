@@ -28,7 +28,7 @@ class Card {
 // --- GAME LOGIC HELPERS ---
 
 function isValidPhom(cards) {
-    if (cards.length < 3) return false;
+    if (!cards || cards.length < 3) return false;
     let firstRank = cards[0].rank;
     if (cards.every(c => c.rank === firstRank)) return true;
     let firstSuit = cards[0].suit;
