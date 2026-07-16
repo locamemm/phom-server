@@ -31,23 +31,6 @@ class Card {
 
 // --- AI & GAME LOGIC HELPERS ---
 
-function isValidPhom(cards) {
-    if (cards.length < 3 || cards.length > 4) return false;
-    // Check Sap (same rank)
-    let firstRank = cards[0].rank;
-    if (cards.every(c => c.rank === firstRank)) return true;
-    // Check Sanh (same suit, consecutive)
-    let firstSuit = cards[0].suit;
-    if (cards.every(c => c.suit === firstSuit)) {
-        let ranks = cards.map(c => c.rank).sort((a, b) => a - b);
-        for (let i = 1; i < ranks.length; i++) {
-            if (ranks[i] !== ranks[i - 1] + 1) return false;
-        }
-        return true;
-    }
-    return false;
-}
-
 function findAllPhoms(cards) {
     let phoms = [];
     for (let r = 1; r <= 13; r++) {
@@ -135,9 +118,8 @@ class Room {
         this.gameStarted = false;
         this.lastDiscardedCard = null;
         this.lastDiscardedPlayerIdx = -1;
-        this.turnStep = 'ACTION'; // 'ACTION', 'DISCARD', 'LAY_MELDS', 'SEND_CARDS'
+        this.turnStep = 'ACTION';
         this.meldStartIdx = -1;
-        this.roundNum = 1;
         this.botTimeout = null;
     }
 
@@ -153,12 +135,10 @@ class Room {
     }
 
     initGame() {
-        console.log(`Initializing game for room ${this.id}`);
         this.gameStarted = true;
         this.tableDiscards = [[], [], [], []];
         this.lastDiscardedCard = null;
         this.lastDiscardedPlayerIdx = -1;
-        this.roundNum = 1;
         this.createDeck();
         this.shuffleDeck();
         this.dealCards();
@@ -209,7 +189,7 @@ class Room {
             players: this.players.map((p) => ({
                 id: p.clientId, name: p.name, isBot: p.isBot,
                 handCardCount: p.hand.length,
-                hand: (p.clientId === clientId || isGameOver) ? p.hand : null, // reveal all hands if game over
+                hand: (p.clientId === clientId || isGameOver) ? p.hand : null,
                 melds: p.melds, eaten: p.eaten, discards: p.discards,
                 balance: p.balance, isMom: p.isMom, isU: p.isU,
                 score: p.score, placement: p.placement, hasLaidMelds: p.hasLaidMelds
@@ -219,9 +199,7 @@ class Room {
             currentTurnIdx: this.currentTurnIdx,
             dealerIdx: this.dealerIdx,
             lastDiscardedCard: this.lastDiscardedCard,
-            turnStep: this.turnStep,
-            roundNum: this.roundNum,
-            meldStartIdx: this.meldStartIdx
+            turnStep: this.turnStep
         };
     }
 
@@ -246,14 +224,8 @@ class Room {
     nextTurn() {
         this.currentTurnIdx = (this.currentTurnIdx + 1) % 4;
         this.turnStep = 'ACTION';
-        if (this.currentTurnIdx === this.dealerIdx) {
-            this.roundNum++;
-        }
 
-        // Check if game should move to meld phase
         if (this.drawPile.length === 0) {
-             // If draw pile empty and next player cannot eat last discarded
-             // For simplicity, we just move to meld phase if drawPile empty after a turn
              this.startMeldPhase();
         } else {
             this.broadcastUpdate();
@@ -269,47 +241,69 @@ class Room {
         this.checkBotTurn();
     }
 
-    applyEatShift(eatenPlayerIdx) {
-        let target = eatenPlayerIdx;
-        let prev1 = (target - 1 + 4) % 4;
-        let prev2 = (target - 2 + 4) % 4;
-        let prev3 = (target - 3 + 4) % 4;
+    performMeldAndSend(playerIdx) {
+        const player = this.players[playerIdx];
+        player.hasLaidMelds = true;
 
-        let shifts = [
-            { from: prev1, to: target },
-            { from: prev2, to: prev1 },
-            { from: prev3, to: prev2 }
-        ];
-
-        shifts.forEach(s => {
-            if (this.tableDiscards[s.from].length > this.tableDiscards[s.to].length) {
-                let slot = this.tableDiscards[s.from];
-                if (slot.length > 0) {
-                    let card = slot.pop();
-                    this.tableDiscards[s.to].push(card);
-                    this.players[s.from].discardCount--;
-                    this.players[s.to].discardCount++;
-                }
-            }
+        // 1. Lay down phoms from hand
+        let partition = getBestPartitions(player.hand);
+        player.melds = [...player.melds, ...partition.phoms];
+        partition.phoms.forEach(phom => {
+            phom.forEach(c => {
+                let idx = player.hand.findIndex(h => h.id === c.id);
+                if (idx !== -1) player.hand.splice(idx, 1);
+            });
         });
-    }
 
-    handleEatPenalty(payerIdx, earnerIdx) {
-        let isChot = (this.players[payerIdx].discardCount === 4);
-        let points = isChot ? 2 : 1;
-        this.players[payerIdx].balance -= points;
-        this.players[earnerIdx].balance += points;
-        this.players[payerIdx].discardCount--;
+        // 2. Check for U
+        if (player.hand.length === 0) player.isU = true;
+
+        // 3. Automatically send cards to others
+        let hasNewSends = true;
+        while (hasNewSends && !player.isU) {
+            let found = false;
+            for (let i = 0; i < player.hand.length; i++) {
+                let card = player.hand[i];
+                for (let target of this.players) {
+                    if (!target.hasLaidMelds) continue;
+                    let allPhoms = [...target.melds, ...target.eaten];
+                    for (let pIdx = 0; pIdx < allPhoms.length; pIdx++) {
+                        if (canExtendMeld(allPhoms[pIdx], card)) {
+                            player.hand.splice(i, 1);
+                            allPhoms[pIdx].push(card);
+                            found = true; break;
+                        }
+                    }
+                    if (found) break;
+                }
+                if (found) break;
+            }
+            if (!found) hasNewSends = false;
+        }
+
+        if (player.hand.length === 0) player.isU = true;
+
+        // 4. Move to next player or End Game
+        let nextIdx = (playerIdx + 1) % 4;
+        if (nextIdx === this.meldStartIdx || player.isU) {
+            this.endGame();
+        } else {
+            this.currentTurnIdx = nextIdx;
+            this.turnStep = 'LAY_MELDS';
+            this.broadcastUpdate();
+            this.checkBotTurn();
+        }
     }
 
     endGame() {
         this.gameStarted = false;
-        // Determine U, Mom and Scores
+        if (this.botTimeout) clearTimeout(this.botTimeout);
+
         this.players.forEach(p => {
-            let partition = getBestPartitions(p.hand);
-            let allPhoms = [...p.melds, ...p.eaten, ...partition.phoms];
-            p.isMom = (allPhoms.length === 0);
-            p.score = p.isMom ? 999 : (p.isU ? 0 : partition.score);
+            let pPart = getBestPartitions(p.hand);
+            let totalPhoms = p.melds.length + p.eaten.length;
+            p.isMom = (totalPhoms === 0);
+            p.score = p.isMom ? 999 : (p.isU ? 0 : pPart.score);
         });
 
         let sorted = [...this.players].sort((a, b) => {
@@ -318,44 +312,33 @@ class Room {
             if (a.isMom && !b.isMom) return 1;
             if (!a.isMom && b.isMom) return -1;
             if (a.score !== b.score) return a.score - b.score;
-            let distA = (a.currentTurnIdx - this.meldStartIdx + 4) % 4;
-            let distB = (b.currentTurnIdx - this.meldStartIdx + 4) % 4;
-            return distA - distB;
+            return 0;
         });
 
         sorted.forEach((p, idx) => p.placement = idx + 1);
 
-        // Point changes (simplified)
         let winner = sorted[0];
         if (winner.isU) {
             this.players.forEach(p => {
-                if (p.id === winner.id) p.balance += 6;
+                if (p.clientId === winner.clientId) p.balance += 6;
                 else p.balance -= 2;
             });
         } else {
             let nonMom = this.players.filter(p => !p.isMom).length;
-            if (nonMom === 0) { /* Draw */ }
-            else if (nonMom === 1) {
-                winner.balance += 3;
-                this.players.filter(p => p.isMom).forEach(p => p.balance -= 1);
-            } else {
-                // Nhất +2, Nhì +1, Ba -1, Bét -2 (simplified)
-                sorted[0].balance += 2; sorted[1].balance += 1;
-                sorted[2].balance -= 1; sorted[3].balance -= 2;
+            if (nonMom > 0) {
+                if (sorted[0]) sorted[0].balance += 2;
+                if (sorted[1]) sorted[1].balance += 1;
+                if (sorted[2]) sorted[2].balance -= 1;
+                if (sorted[3]) sorted[3].balance -= 2;
             }
         }
 
-        // Set dealer for next game
-        this.dealerIdx = winner.id ? this.players.findIndex(p => p.clientId === winner.clientId) : (this.dealerIdx + 1) % 4;
-
+        this.dealerIdx = (this.dealerIdx + 1) % 4;
         this.broadcastGameOver();
     }
 
     checkBotTurn() {
-        if (!this.gameStarted) {
-             // Maybe someone U?
-             return;
-        }
+        if (!this.gameStarted) return;
         const player = this.players[this.currentTurnIdx];
         if (player && player.isBot) {
             if (this.botTimeout) clearTimeout(this.botTimeout);
@@ -365,7 +348,7 @@ class Room {
 
     runBotAI() {
         const bot = this.players[this.currentTurnIdx];
-        if (!bot || !bot.isBot) return;
+        if (!bot || !bot.isBot || !this.gameStarted) return;
 
         if (this.turnStep === 'ACTION') {
             let ate = false;
@@ -379,8 +362,6 @@ class Room {
                         const caIds = phom.filter(c => c.id !== this.lastDiscardedCard.id).map(c => c.id);
                         bot.hand = bot.hand.filter(c => !caIds.includes(c.id));
                         bot.eaten.push([this.lastDiscardedCard, ...phom.filter(c => c.id !== this.lastDiscardedCard.id)]);
-                        this.handleEatPenalty(this.lastDiscardedPlayerIdx, this.currentTurnIdx);
-                        this.applyEatShift(this.lastDiscardedPlayerIdx);
                         this.tableDiscards[this.lastDiscardedPlayerIdx].pop();
                         this.lastDiscardedCard = null;
                         this.turnStep = 'DISCARD';
@@ -389,10 +370,8 @@ class Room {
                 }
             }
             if (!ate) {
-                if (this.drawPile.length > 0) {
-                    bot.hand.push(this.drawPile.pop());
-                    this.turnStep = 'DISCARD';
-                } else { this.startMeldPhase(); return; }
+                if (this.drawPile.length > 0) { bot.hand.push(this.drawPile.pop()); this.turnStep = 'DISCARD'; }
+                else { this.startMeldPhase(); return; }
             }
             this.broadcastUpdate();
             this.checkBotTurn();
@@ -406,48 +385,9 @@ class Room {
             this.lastDiscardedCard = discardCard;
             this.lastDiscardedPlayerIdx = this.currentTurnIdx;
             bot.discardCount++;
-            if (getBestPartitions(bot.hand).racs.length === 0) { bot.isU = true; this.endGame(); return; }
             this.nextTurn();
         } else if (this.turnStep === 'LAY_MELDS') {
-            bot.hasLaidMelds = true;
-            let partition = getBestPartitions(bot.hand);
-            bot.melds = partition.phoms;
-            partition.phoms.forEach(phom => {
-                phom.forEach(c => {
-                    let cIdx = bot.hand.findIndex(ch => ch.id === c.id);
-                    if (cIdx !== -1) bot.hand.splice(cIdx, 1);
-                });
-            });
-            if (bot.hand.length === 0) { bot.isU = true; this.endGame(); return; }
-            this.turnStep = 'SEND_CARDS';
-            this.broadcastUpdate();
-            this.checkBotTurn();
-        } else if (this.turnStep === 'SEND_CARDS') {
-            let hasNewSends = true;
-            while (hasNewSends) {
-                let found = false;
-                for (let card of bot.hand) {
-                    for (let targetPlayer of this.players) {
-                        if (!targetPlayer.hasLaidMelds) continue;
-                        let allTargetPhoms = [...targetPlayer.melds, ...targetPlayer.eaten];
-                        for (let meldIdx = 0; meldIdx < allTargetPhoms.length; meldIdx++) {
-                            if (canExtendMeld(allTargetPhoms[meldIdx], card)) {
-                                let removed = bot.hand.splice(bot.hand.indexOf(card), 1)[0];
-                                // simplify: just push to melds
-                                targetPlayer.melds[0].push(removed);
-                                found = true; break;
-                            }
-                        }
-                        if (found) break;
-                    }
-                    if (found) break;
-                }
-                if (!found) hasNewSends = false;
-            }
-            if (bot.hand.length === 0) { bot.isU = true; this.endGame(); return; }
-            let nextIdx = (this.currentTurnIdx + 1) % 4;
-            if (nextIdx === this.meldStartIdx) { this.endGame(); }
-            else { this.currentTurnIdx = nextIdx; this.turnStep = 'LAY_MELDS'; this.broadcastUpdate(); this.checkBotTurn(); }
+            this.performMeldAndSend(this.currentTurnIdx);
         }
     }
 }
@@ -456,7 +396,6 @@ const rooms = {};
 const socketToRoom = {};
 
 io.on('connection', (socket) => {
-    console.log('User connected:', socket.id);
     const clientId = socket.id;
     socket.emit('message', { type: 'REGISTER', payload: { clientId } });
 
@@ -487,15 +426,14 @@ io.on('connection', (socket) => {
                     io.to(rId).emit('message', { type: 'PLAYER_JOINED', payload: { playerCount: r.players.length } });
                     if (r.players.length === 4) r.initGame();
                 } else {
-                    socket.emit('message', { type: 'ERROR', payload: { message: 'Phòng đầy hoặc không tồn tại.' } });
+                    socket.emit('message', { type: 'ERROR', payload: { message: 'Phòng lỗi hoặc đã đầy.' } });
                 }
                 break;
             }
             case 'ADD_BOT': {
                 if (room && room.players.length < 4) {
                     const botNames = ['Lâm Híp', 'Bác Ba Phi', 'Chị Hoa', 'Anh Bốn'];
-                    const botId = `bot-${Date.now()}-${room.players.length}`;
-                    room.addPlayer(null, botId, botNames[room.players.length] || 'Máy', true);
+                    room.addPlayer(null, `bot-${Date.now()}`, botNames[room.players.length] || 'Máy', true);
                     io.to(roomId).emit('message', { type: 'PLAYER_JOINED', payload: { playerCount: room.players.length } });
                     if (room.players.length === 4) room.initGame();
                 }
@@ -509,10 +447,8 @@ io.on('connection', (socket) => {
                 const p = room.players[pIdx];
 
                 if (action === 'DRAW' && room.turnStep === 'ACTION') {
-                    if (room.drawPile.length > 0) {
-                        p.hand.push(room.drawPile.pop());
-                        room.turnStep = 'DISCARD';
-                    } else { room.startMeldPhase(); }
+                    if (room.drawPile.length > 0) { p.hand.push(room.drawPile.pop()); room.turnStep = 'DISCARD'; }
+                    else { room.startMeldPhase(); }
                 } else if (action === 'DISCARD' && room.turnStep === 'DISCARD') {
                     const cIdx = p.hand.findIndex(c => c.id === cardId);
                     if (cIdx !== -1) {
@@ -526,38 +462,17 @@ io.on('connection', (socket) => {
                     }
                 } else if (action === 'EAT' && room.turnStep === 'ACTION') {
                     if (room.lastDiscardedCard && cardIds) {
-                        const eatenCard = room.lastDiscardedCard;
                         const caCards = p.hand.filter(c => cardIds.includes(c.id));
                         if (caCards.length >= 2) {
                             p.hand = p.hand.filter(c => !cardIds.includes(c.id));
-                            p.eaten.push([eatenCard, ...caCards]);
-                            room.handleEatPenalty(room.lastDiscardedPlayerIdx, pIdx);
-                            room.applyEatShift(room.lastDiscardedPlayerIdx);
+                            p.eaten.push([room.lastDiscardedCard, ...caCards]);
                             room.tableDiscards[room.lastDiscardedPlayerIdx].pop();
                             room.lastDiscardedCard = null;
                             room.turnStep = 'DISCARD';
                         }
                     }
-                } else if (action === 'LAY_MELDS' && (room.turnStep === 'LAY_MELDS' || room.turnStep === 'DISCARD')) {
-                    if (room.turnStep === 'DISCARD') {
-                        if (getBestPartitions(p.hand).racs.length <= 1) {
-                            p.isU = true; room.endGame(); return;
-                        }
-                    }
-                    p.hasLaidMelds = true;
-                    let partition = getBestPartitions(p.hand);
-                    p.melds = partition.phoms;
-                    partition.phoms.forEach(ph => ph.forEach(c => {
-                        let i = p.hand.findIndex(ch => ch.id === c.id);
-                        if (i !== -1) p.hand.splice(i, 1);
-                    }));
-                    if (p.hand.length === 0) { p.isU = true; room.endGame(); return; }
-                    room.turnStep = 'SEND_CARDS';
-                } else if (action === 'SEND_CARDS' && room.turnStep === 'SEND_CARDS') {
-                    // Manual send not implemented yet, just skip to next player
-                    let nextIdx = (room.currentTurnIdx + 1) % 4;
-                    if (nextIdx === room.meldStartIdx) { room.endGame(); }
-                    else { room.currentTurnIdx = nextIdx; room.turnStep = 'LAY_MELDS'; }
+                } else if (action === 'LAY_MELDS' && room.turnStep === 'LAY_MELDS') {
+                    room.performMeldAndSend(pIdx);
                 }
                 room.broadcastUpdate();
                 room.checkBotTurn();
