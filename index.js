@@ -7,11 +7,7 @@ const app = express();
 app.use(cors());
 const server = http.createServer(app);
 const io = new Server(server, {
-    cors: {
-        origin: "*",
-        methods: ["GET", "POST"],
-        credentials: true
-    },
+    cors: { origin: "*", methods: ["GET", "POST"], credentials: true },
     allowEIO3: true
 });
 
@@ -32,7 +28,7 @@ class Card {
 // --- GAME LOGIC HELPERS ---
 
 function isValidPhom(cards) {
-    if (cards.length < 3 || cards.length > 4) return false;
+    if (cards.length < 3) return false;
     let firstRank = cards[0].rank;
     if (cards.every(c => c.rank === firstRank)) return true;
     let firstSuit = cards[0].suit;
@@ -62,11 +58,7 @@ function findAllPhoms(cards) {
         for (let i = 0; i < suitCards.length; i++) {
             for (let len = 3; len <= suitCards.length - i; len++) {
                 let sub = suitCards.slice(i, i + len);
-                let isConsec = true;
-                for (let k = 1; k < sub.length; k++) {
-                    if (sub[k].rank !== sub[k-1].rank + 1) { isConsec = false; break; }
-                }
-                if (isConsec) phoms.push(sub);
+                if (isValidPhom(sub)) phoms.push(sub);
             }
         }
     }
@@ -111,10 +103,9 @@ function canExtendMeld(meld, card) {
     }
     if (meld[0].suit === card.suit) {
         let sorted = [...meld].sort((a, b) => a.rank - b.rank);
-        let min = sorted[0].rank;
-        let max = sorted[sorted.length - 1].rank;
-        if (card.rank === min - 1 || card.rank === max + 1) {
-            let isSanh = sorted.every((c, idx) => idx === 0 || c.rank === sorted[idx-1].rank + 1);
+        if (card.rank === sorted[0].rank - 1 || card.rank === sorted[sorted.length - 1].rank + 1) {
+            let combined = [...meld, card].sort((a, b) => a.rank - b.rank);
+            let isSanh = combined.every((c, idx) => idx === 0 || c.rank === combined[idx-1].rank + 1);
             if (isSanh) return true;
         }
     }
@@ -196,6 +187,14 @@ class Room {
         }
         this.currentTurnIdx = this.dealerIdx;
         this.turnStep = this.players[this.currentTurnIdx].hand.length === 10 ? 'DISCARD' : 'ACTION';
+
+        // Kiểm tra Ù khan ngay khi chia bài
+        this.players.forEach(p => {
+            if (getBestPartitions(p.hand).racs.length === 0) {
+                p.isU = true;
+                this.endGame();
+            }
+        });
     }
 
     getGameState(clientId, isGameOver = false) {
@@ -255,36 +254,11 @@ class Room {
         this.checkBotTurn();
     }
 
-    applyEatShift(eatenPlayerIdx) {
-        let target = eatenPlayerIdx;
-        let prev1 = (target - 1 + 4) % 4;
-        let prev2 = (target - 2 + 4) % 4;
-        let prev3 = (target - 3 + 4) % 4;
-        let shifts = [{ from: prev1, to: target }, { from: prev2, to: prev1 }, { from: prev3, to: prev2 }];
-        shifts.forEach(s => {
-            if (this.tableDiscards[s.from].length > this.tableDiscards[s.to].length) {
-                let slot = this.tableDiscards[s.from];
-                if (slot.length > 0) {
-                    let card = slot.pop();
-                    this.tableDiscards[s.to].push(card);
-                    this.players[s.from].discardCount--;
-                    this.players[s.to].discardCount++;
-                }
-            }
-        });
-    }
-
-    handleEatPenalty(payerIdx, earnerIdx) {
-        let isChot = (this.players[payerIdx].discardCount === 4);
-        let points = isChot ? 2 : 1;
-        this.players[payerIdx].balance -= points;
-        this.players[earnerIdx].balance += points;
-        this.players[payerIdx].discardCount--;
-    }
-
     performMeldAndSend(playerIdx) {
         const player = this.players[playerIdx];
+        if (player.hasLaidMelds) return;
         player.hasLaidMelds = true;
+
         let partition = getBestPartitions(player.hand);
         player.melds = [...player.melds, ...partition.phoms];
         partition.phoms.forEach(phom => {
@@ -293,7 +267,9 @@ class Room {
                 if (idx !== -1) player.hand.splice(idx, 1);
             });
         });
+
         if (player.hand.length === 0) player.isU = true;
+
         let hasNewSends = true;
         while (hasNewSends && !player.isU) {
             let found = false;
@@ -301,11 +277,11 @@ class Room {
                 let card = player.hand[i];
                 for (let target of this.players) {
                     if (!target.hasLaidMelds) continue;
-                    let allPhoms = [...target.melds, ...target.eaten];
-                    for (let pIdx = 0; pIdx < allPhoms.length; pIdx++) {
-                        if (canExtendMeld(allPhoms[pIdx], card)) {
+                    let allTargetPhoms = [...target.melds, ...target.eaten];
+                    for (let pIdx = 0; pIdx < allTargetPhoms.length; pIdx++) {
+                        if (canExtendMeld(allTargetPhoms[pIdx], card)) {
                             player.hand.splice(i, 1);
-                            allPhoms[pIdx].push(card);
+                            allTargetPhoms[pIdx].push(card);
                             found = true; break;
                         }
                     }
@@ -315,21 +291,31 @@ class Room {
             }
             if (!found) hasNewSends = false;
         }
+
         if (player.hand.length === 0) player.isU = true;
+
         let nextIdx = (playerIdx + 1) % 4;
-        if (nextIdx === this.meldStartIdx || player.isU) { this.endGame(); }
-        else { this.currentTurnIdx = nextIdx; this.turnStep = 'LAY_MELDS'; this.broadcastUpdate(); this.checkBotTurn(); }
+        if (nextIdx === this.meldStartIdx || player.isU) {
+            this.endGame();
+        } else {
+            this.currentTurnIdx = nextIdx;
+            this.turnStep = 'LAY_MELDS';
+            this.broadcastUpdate();
+            this.checkBotTurn();
+        }
     }
 
     endGame() {
         this.gameStarted = false;
         if (this.botTimeout) clearTimeout(this.botTimeout);
+
         this.players.forEach(p => {
             let pPart = getBestPartitions(p.hand);
             let totalPhoms = p.melds.length + p.eaten.length;
             p.isMom = (totalPhoms === 0);
             p.score = p.isMom ? 999 : (p.isU ? 0 : pPart.score);
         });
+
         let sorted = [...this.players].sort((a, b) => {
             if (a.isU && !b.isU) return -1;
             if (!a.isU && b.isU) return 1;
@@ -338,7 +324,9 @@ class Room {
             if (a.score !== b.score) return a.score - b.score;
             return 0;
         });
+
         sorted.forEach((p, idx) => p.placement = idx + 1);
+
         let winner = sorted[0];
         if (winner.isU) {
             this.players.forEach(p => {
@@ -346,15 +334,16 @@ class Room {
                 else p.balance -= 2;
             });
         } else {
-            let nonMom = this.players.filter(p => !p.isMom).length;
-            if (nonMom > 0) {
+            let nonMomCount = this.players.filter(p => !p.isMom).length;
+            if (nonMomCount > 0) {
                 if (sorted[0]) sorted[0].balance += 2;
                 if (sorted[1]) sorted[1].balance += 1;
                 if (sorted[2]) sorted[2].balance -= 1;
                 if (sorted[3]) sorted[3].balance -= 2;
             }
         }
-        this.dealerIdx = (this.dealerIdx + 1) % 4;
+
+        this.dealerIdx = winner.clientId ? this.players.findIndex(p => p.clientId === winner.clientId) : (this.dealerIdx + 1) % 4;
         this.broadcastGameOver();
     }
 
@@ -370,6 +359,7 @@ class Room {
     runBotAI() {
         const bot = this.players[this.currentTurnIdx];
         if (!bot || !bot.isBot || !this.gameStarted) return;
+
         if (this.turnStep === 'ACTION') {
             let ate = false;
             if (this.lastDiscardedCard && this.lastDiscardedPlayerIdx !== this.currentTurnIdx) {
@@ -383,7 +373,6 @@ class Room {
                         bot.hand = bot.hand.filter(c => !caIds.includes(c.id));
                         bot.eaten.push([this.lastDiscardedCard, ...phom.filter(c => c.id !== this.lastDiscardedCard.id)]);
                         this.handleEatPenalty(this.lastDiscardedPlayerIdx, this.currentTurnIdx);
-                        this.applyEatShift(this.lastDiscardedPlayerIdx);
                         this.tableDiscards[this.lastDiscardedPlayerIdx].pop();
                         this.lastDiscardedCard = null;
                         this.turnStep = 'DISCARD';
@@ -395,7 +384,8 @@ class Room {
                 if (this.drawPile.length > 0) { bot.hand.push(this.drawPile.pop()); this.turnStep = 'DISCARD'; }
                 else { this.startMeldPhase(); return; }
             }
-            this.broadcastUpdate(); this.checkBotTurn();
+            this.broadcastUpdate();
+            this.checkBotTurn();
         } else if (this.turnStep === 'DISCARD') {
             const partition = getBestPartitions(bot.hand);
             if (partition.racs.length === 0) { bot.isU = true; this.endGame(); return; }
@@ -406,10 +396,19 @@ class Room {
             this.lastDiscardedCard = discardCard;
             this.lastDiscardedPlayerIdx = this.currentTurnIdx;
             bot.discardCount++;
+            if (getBestPartitions(bot.hand).racs.length === 0) { bot.isU = true; this.endGame(); return; }
             this.nextTurn();
         } else if (this.turnStep === 'LAY_MELDS') {
             this.performMeldAndSend(this.currentTurnIdx);
         }
+    }
+
+    handleEatPenalty(payerIdx, earnerIdx) {
+        let isChot = (this.players[payerIdx].discardCount === 4);
+        let points = isChot ? 2 : 1;
+        this.players[payerIdx].balance -= points;
+        this.players[earnerIdx].balance += points;
+        this.players[payerIdx].discardCount--;
     }
 }
 
@@ -419,10 +418,12 @@ const socketToRoom = {};
 io.on('connection', (socket) => {
     const clientId = socket.id;
     socket.emit('message', { type: 'REGISTER', payload: { clientId } });
+
     socket.on('message', (data) => {
         const { type, payload } = data;
         const roomId = socketToRoom[socket.id];
         const room = rooms[roomId];
+
         switch (type) {
             case 'CREATE_ROOM': {
                 const newId = Math.random().toString(36).substring(2, 8).toUpperCase();
@@ -442,7 +443,7 @@ io.on('connection', (socket) => {
                     socket.emit('message', { type: 'JOIN_SUCCESS', payload: { roomId: rId, playerCount: r.players.length, isHost: false } });
                     io.to(rId).emit('message', { type: 'PLAYER_JOINED', payload: { playerCount: r.players.length } });
                     if (r.players.length === 4) r.initGame();
-                } else { socket.emit('message', { type: 'ERROR', payload: { message: 'Phòng lỗi hoặc đã đầy.' } }); }
+                } else { socket.emit('message', { type: 'ERROR', payload: { message: 'Phòng đầy hoặc không tồn tại.' } }); }
                 break;
             }
             case 'ADD_BOT': {
@@ -460,6 +461,7 @@ io.on('connection', (socket) => {
                 if (pIdx !== room.currentTurnIdx) return;
                 const { action, cardId, cardIds } = payload;
                 const p = room.players[pIdx];
+
                 if (action === 'DRAW' && room.turnStep === 'ACTION') {
                     if (room.drawPile.length > 0) { p.hand.push(room.drawPile.pop()); room.turnStep = 'DISCARD'; }
                     else { room.startMeldPhase(); }
@@ -467,8 +469,10 @@ io.on('connection', (socket) => {
                     const cIdx = p.hand.findIndex(c => c.id === cardId);
                     if (cIdx !== -1) {
                         const card = p.hand.splice(cIdx, 1)[0];
-                        room.tableDiscards[pIdx].push(card); room.lastDiscardedCard = card;
-                        room.lastDiscardedPlayerIdx = pIdx; p.discardCount++;
+                        room.tableDiscards[pIdx].push(card);
+                        room.lastDiscardedCard = card;
+                        room.lastDiscardedPlayerIdx = pIdx;
+                        p.discardCount++;
                         if (getBestPartitions(p.hand).racs.length === 0) { p.isU = true; room.endGame(); return; }
                         room.nextTurn();
                     }
@@ -476,19 +480,30 @@ io.on('connection', (socket) => {
                     if (room.lastDiscardedCard && cardIds) {
                         const eatenCard = room.lastDiscardedCard;
                         const caCards = p.hand.filter(c => cardIds.includes(c.id));
-                        if (caCards.length >= 2) {
+                        const fullPhom = [eatenCard, ...caCards];
+                        if (isValidPhom(fullPhom)) {
                             p.hand = p.hand.filter(c => !cardIds.includes(c.id));
-                            p.eaten.push([eatenCard, ...caCards]);
+                            p.eaten.push(fullPhom);
                             room.handleEatPenalty(room.lastDiscardedPlayerIdx, pIdx);
-                            room.applyEatShift(room.lastDiscardedPlayerIdx);
                             room.tableDiscards[room.lastDiscardedPlayerIdx].pop();
-                            room.lastDiscardedCard = null; room.turnStep = 'DISCARD';
+                            room.lastDiscardedCard = null;
+                            room.turnStep = 'DISCARD';
+                        } else {
+                            socket.emit('message', { type: 'ERROR', payload: { message: 'Phỏm không hợp lệ!' } });
+                            return;
                         }
                     }
-                } else if (action === 'LAY_MELDS' && room.turnStep === 'LAY_MELDS') {
-                    room.performMeldAndSend(pIdx);
+                } else if (action === 'LAY_MELDS') {
+                    if (room.turnStep === 'DISCARD') {
+                        if (getBestPartitions(p.hand).racs.length <= 1) {
+                            p.isU = true; room.endGame(); return;
+                        }
+                    } else if (room.turnStep === 'LAY_MELDS') {
+                        room.performMeldAndSend(pIdx);
+                    }
                 }
-                room.broadcastUpdate(); room.checkBotTurn();
+                room.broadcastUpdate();
+                room.checkBotTurn();
                 break;
             }
         }
