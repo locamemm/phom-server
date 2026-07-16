@@ -119,11 +119,15 @@ class Room {
     }
 
     initGame() {
+        console.log(`Initializing game for room ${this.id}`);
         this.gameStarted = true;
         this.tableDiscards = [[], [], [], []];
+        this.lastDiscardedCard = null;
+        this.lastDiscardedPlayerIdx = -1;
         this.createDeck();
         this.shuffleDeck();
         this.dealCards();
+        this.broadcastGameStart();
         this.checkBotTurn();
     }
 
@@ -179,9 +183,26 @@ class Room {
         };
     }
 
+    broadcastGameStart() {
+        console.log(`Broadcasting GAME_START to room ${this.id}`);
+        this.players.forEach(p => {
+            if (p.socketId) {
+                io.to(p.socketId).emit('message', {
+                    type: 'GAME_START',
+                    payload: this.getGameState(p.clientId)
+                });
+            }
+        });
+    }
+
     broadcastUpdate() {
         this.players.forEach(p => {
-            if (p.socketId) io.to(p.socketId).emit('message', { type: 'GAME_STATE_UPDATE', payload: this.getGameState(p.clientId) });
+            if (p.socketId) {
+                io.to(p.socketId).emit('message', {
+                    type: 'GAME_STATE_UPDATE',
+                    payload: this.getGameState(p.clientId)
+                });
+            }
         });
     }
 
@@ -196,19 +217,18 @@ class Room {
 
     runBotAI() {
         const bot = this.players[this.currentTurnIdx];
-        if (!bot || !bot.isBot) return;
+        if (!bot || !bot.isBot || !this.gameStarted) return;
+
+        console.log(`Bot AI thinking: ${bot.name} (Step: ${this.turnStep})`);
 
         if (this.turnStep === 'ACTION') {
-            // Decide to Eat or Draw
             let ate = false;
             if (this.lastDiscardedCard && this.lastDiscardedPlayerIdx !== this.currentTurnIdx) {
                 const testHand = [...bot.hand, this.lastDiscardedCard];
                 const withEat = getBestPartitions(testHand);
                 const withoutEat = getBestPartitions(bot.hand);
 
-                // If eating creates more phoms or significantly reduces score
                 if (withEat.phoms.length > withoutEat.phoms.length) {
-                    // Try to find which cards make the Phom
                     const phom = withEat.phoms.find(p => p.some(c => c.id === this.lastDiscardedCard.id));
                     if (phom) {
                         const caIds = phom.filter(c => c.id !== this.lastDiscardedCard.id).map(c => c.id);
@@ -218,6 +238,7 @@ class Room {
                         this.lastDiscardedCard = null;
                         this.turnStep = 'DISCARD';
                         ate = true;
+                        console.log(`Bot ${bot.name} ATE card`);
                     }
                 }
             }
@@ -226,31 +247,34 @@ class Room {
                 if (this.drawPile.length > 0) {
                     bot.hand.push(this.drawPile.pop());
                     this.turnStep = 'DISCARD';
+                    console.log(`Bot ${bot.name} DREW card`);
                 } else {
-                    // Game should end or move to meld phase, for now just skip
                     this.currentTurnIdx = (this.currentTurnIdx + 1) % 4;
                     this.turnStep = 'ACTION';
                 }
             }
             this.broadcastUpdate();
-            this.checkBotTurn(); // Run discard phase
+            this.checkBotTurn();
         } else if (this.turnStep === 'DISCARD') {
             const partition = getBestPartitions(bot.hand);
             const discardCard = partition.racs.length > 0
                 ? partition.racs.sort((a,b) => b.rank - a.rank)[0]
                 : bot.hand[0];
 
-            const idx = bot.hand.findIndex(c => c.id === discardCard.id);
-            bot.hand.splice(idx, 1);
-            this.tableDiscards[this.currentTurnIdx].push(discardCard);
-            this.lastDiscardedCard = discardCard;
-            this.lastDiscardedPlayerIdx = this.currentTurnIdx;
-            bot.discardCount++;
+            if (discardCard) {
+                const idx = bot.hand.findIndex(c => c.id === discardCard.id);
+                bot.hand.splice(idx, 1);
+                this.tableDiscards[this.currentTurnIdx].push(discardCard);
+                this.lastDiscardedCard = discardCard;
+                this.lastDiscardedPlayerIdx = this.currentTurnIdx;
+                bot.discardCount++;
+                console.log(`Bot ${bot.name} DISCARDED ${discardCard.id}`);
+            }
 
             this.currentTurnIdx = (this.currentTurnIdx + 1) % 4;
             this.turnStep = 'ACTION';
             this.broadcastUpdate();
-            this.checkBotTurn(); // Check if next player is bot
+            this.checkBotTurn();
         }
     }
 }
@@ -297,7 +321,8 @@ io.on('connection', (socket) => {
             case 'ADD_BOT': {
                 if (room && room.players.length < 4) {
                     const botNames = ['Lâm Híp', 'Bác Ba Phi', 'Chị Hoa', 'Anh Bốn'];
-                    room.addPlayer(null, `bot-${Date.now()}`, botNames[room.players.length] || 'Máy', true);
+                    const botId = `bot-${Date.now()}-${room.players.length}`;
+                    room.addPlayer(null, botId, botNames[room.players.length] || 'Máy', true);
                     io.to(roomId).emit('message', { type: 'PLAYER_JOINED', payload: { playerCount: room.players.length } });
                     if (room.players.length === 4) room.initGame();
                 }
@@ -341,7 +366,15 @@ io.on('connection', (socket) => {
             }
         }
     });
-    socket.on('disconnect', () => { delete socketToRoom[socket.id]; });
+    socket.on('disconnect', () => {
+        // Xử lý khi người chơi thoát để tránh lỗi treo bot
+        const roomId = socketToRoom[socket.id];
+        if (rooms[roomId]) {
+            const r = rooms[roomId];
+            if (r.botTimeout) clearTimeout(r.botTimeout);
+        }
+        delete socketToRoom[socket.id];
+    });
 });
 
 server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
