@@ -12,7 +12,7 @@ const io = new Server(server, {
         methods: ["GET", "POST"],
         credentials: true
     },
-    allowEIO3: true // Hỗ trợ thêm các phiên bản cũ nếu cần
+    allowEIO3: true
 });
 
 const PORT = process.env.PORT || 8080;
@@ -33,15 +33,13 @@ class Card {
 class Room {
     constructor(id) {
         this.id = id;
-        this.players = []; // { socketId, clientId, name, isBot, hand: [], melds: [], eaten: [], discards: [] ... }
+        this.players = [];
         this.deck = [];
         this.drawPileCount = 0;
         this.tableDiscards = [[], [], [], []];
         this.currentTurnIdx = 0;
         this.dealerIdx = 0;
         this.gameStarted = false;
-        this.lastDiscardedCard = null;
-        this.lastDiscardedPlayerIdx = -1;
     }
 
     addPlayer(socketId, clientId, name, isBot = false) {
@@ -86,7 +84,6 @@ class Room {
 
     dealCards() {
         this.players.forEach(p => p.hand = []);
-        // Dealer gets 10, others 9
         let cardsToDeal = 9 * 4 + 1;
         let curr = this.dealerIdx;
         let dealt = 0;
@@ -110,7 +107,7 @@ class Room {
                 name: p.name,
                 isBot: p.isBot,
                 handCardCount: p.hand.length,
-                hand: p.clientId === clientId ? p.hand : null, // Only send full hand to owner
+                hand: p.clientId === clientId ? p.hand : null,
                 melds: p.melds,
                 eaten: p.eaten,
                 discards: p.discards
@@ -118,17 +115,18 @@ class Room {
             tableDiscards: this.tableDiscards,
             drawPileCount: this.drawPileCount,
             currentTurnIdx: this.currentTurnIdx,
-            dealerIdx: this.dealerIdx,
-            lastDiscardedCard: this.lastDiscardedCard
+            dealerIdx: this.dealerIdx
         };
     }
 }
 
 const rooms = {};
+// Map socket.id to roomId for fast lookup
+const socketToRoom = {};
 
 io.on('connection', (socket) => {
     console.log('User connected:', socket.id);
-    const clientId = socket.id; // Using socket.id as clientId for simplicity
+    const clientId = socket.id;
 
     socket.emit('message', { type: 'REGISTER', payload: { clientId } });
 
@@ -139,18 +137,21 @@ io.on('connection', (socket) => {
             case 'CREATE_ROOM': {
                 const roomId = Math.random().toString(36).substring(2, 8).toUpperCase();
                 const room = new Room(roomId);
-                room.addPlayer(socket.id, clientId, payload.name || 'Host');
+                room.addPlayer(socket.id, clientId, payload.name || 'Chủ phòng');
                 rooms[roomId] = room;
+                socketToRoom[socket.id] = roomId;
                 socket.join(roomId);
                 socket.emit('message', { type: 'JOIN_SUCCESS', payload: { roomId, playerCount: 1, isHost: true } });
+                console.log(`Room created: ${roomId} by ${socket.id}`);
                 break;
             }
 
             case 'JOIN_ROOM': {
-                const roomId = payload.roomId;
+                const roomId = payload.roomId ? payload.roomId.toUpperCase() : '';
                 const room = rooms[roomId];
                 if (room && room.players.length < 4) {
-                    room.addPlayer(socket.id, clientId, payload.name || 'Player');
+                    room.addPlayer(socket.id, clientId, payload.name || 'Người chơi');
+                    socketToRoom[socket.id] = roomId;
                     socket.join(roomId);
                     socket.emit('message', { type: 'JOIN_SUCCESS', payload: { roomId, playerCount: room.players.length, isHost: false } });
                     io.to(roomId).emit('message', { type: 'PLAYER_JOINED', payload: { playerCount: room.players.length } });
@@ -158,7 +159,7 @@ io.on('connection', (socket) => {
                     if (room.players.length === 4) {
                         room.initGame();
                         room.players.forEach(p => {
-                            io.to(p.socketId).emit('message', { type: 'GAME_START', payload: room.getGameState(p.clientId) });
+                            if (p.socketId) io.to(p.socketId).emit('message', { type: 'GAME_START', payload: room.getGameState(p.clientId) });
                         });
                     }
                 } else {
@@ -168,14 +169,16 @@ io.on('connection', (socket) => {
             }
 
             case 'ADD_BOT': {
-                // Find room the host is in
-                const roomId = Array.from(socket.rooms).find(r => rooms[r]);
+                const roomId = socketToRoom[socket.id];
                 const room = rooms[roomId];
+                console.log(`ADD_BOT request for room: ${roomId}`);
                 if (room && room.players.length < 4) {
                     const botNames = ['Lâm Híp', 'Bác Ba Phi', 'Chị Hoa', 'Anh Bốn'];
                     const name = botNames[room.players.length] || `Bot ${room.players.length}`;
-                    room.addPlayer(null, `bot-${Date.now()}`, name, true);
+                    room.addPlayer(null, `bot-${Date.now()}-${room.players.length}`, name, true);
+
                     io.to(roomId).emit('message', { type: 'PLAYER_JOINED', payload: { playerCount: room.players.length } });
+                    console.log(`Bot added to room ${roomId}. Total: ${room.players.length}`);
 
                     if (room.players.length === 4) {
                         room.initGame();
@@ -190,19 +193,14 @@ io.on('connection', (socket) => {
             }
 
             case 'PLAYER_ACTION': {
-                const roomId = Array.from(socket.rooms).find(r => rooms[r]);
+                const roomId = socketToRoom[socket.id];
                 const room = rooms[roomId];
                 if (!room) return;
 
                 const playerIdx = room.players.findIndex(p => p.clientId === clientId);
                 if (playerIdx !== room.currentTurnIdx) return;
 
-                const { action, cardId, cardIds } = payload;
-                // Simple turn management for quick testing:
-                // Just broadcast the update for now, real validation would be complex
-                // In a real server, we would modify room state here.
-
-                // Temporary: Just cycle turn to next player for testing
+                const { action } = payload;
                 if (action === 'DISCARD') {
                     room.currentTurnIdx = (room.currentTurnIdx + 1) % 4;
                 }
@@ -219,7 +217,7 @@ io.on('connection', (socket) => {
 
     socket.on('disconnect', () => {
         console.log('User disconnected:', socket.id);
-        // Handle player leaving room
+        delete socketToRoom[socket.id];
     });
 });
 
