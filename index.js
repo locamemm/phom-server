@@ -29,7 +29,22 @@ class Card {
     }
 }
 
-// --- AI & GAME LOGIC HELPERS ---
+// --- GAME LOGIC HELPERS ---
+
+function isValidPhom(cards) {
+    if (cards.length < 3 || cards.length > 4) return false;
+    let firstRank = cards[0].rank;
+    if (cards.every(c => c.rank === firstRank)) return true;
+    let firstSuit = cards[0].suit;
+    if (cards.every(c => c.suit === firstSuit)) {
+        let ranks = cards.map(c => c.rank).sort((a, b) => a - b);
+        for (let i = 1; i < ranks.length; i++) {
+            if (ranks[i] !== ranks[i - 1] + 1) return false;
+        }
+        return true;
+    }
+    return false;
+}
 
 function findAllPhoms(cards) {
     let phoms = [];
@@ -224,7 +239,6 @@ class Room {
     nextTurn() {
         this.currentTurnIdx = (this.currentTurnIdx + 1) % 4;
         this.turnStep = 'ACTION';
-
         if (this.drawPile.length === 0) {
              this.startMeldPhase();
         } else {
@@ -241,11 +255,36 @@ class Room {
         this.checkBotTurn();
     }
 
+    applyEatShift(eatenPlayerIdx) {
+        let target = eatenPlayerIdx;
+        let prev1 = (target - 1 + 4) % 4;
+        let prev2 = (target - 2 + 4) % 4;
+        let prev3 = (target - 3 + 4) % 4;
+        let shifts = [{ from: prev1, to: target }, { from: prev2, to: prev1 }, { from: prev3, to: prev2 }];
+        shifts.forEach(s => {
+            if (this.tableDiscards[s.from].length > this.tableDiscards[s.to].length) {
+                let slot = this.tableDiscards[s.from];
+                if (slot.length > 0) {
+                    let card = slot.pop();
+                    this.tableDiscards[s.to].push(card);
+                    this.players[s.from].discardCount--;
+                    this.players[s.to].discardCount++;
+                }
+            }
+        });
+    }
+
+    handleEatPenalty(payerIdx, earnerIdx) {
+        let isChot = (this.players[payerIdx].discardCount === 4);
+        let points = isChot ? 2 : 1;
+        this.players[payerIdx].balance -= points;
+        this.players[earnerIdx].balance += points;
+        this.players[payerIdx].discardCount--;
+    }
+
     performMeldAndSend(playerIdx) {
         const player = this.players[playerIdx];
         player.hasLaidMelds = true;
-
-        // 1. Lay down phoms from hand
         let partition = getBestPartitions(player.hand);
         player.melds = [...player.melds, ...partition.phoms];
         partition.phoms.forEach(phom => {
@@ -254,11 +293,7 @@ class Room {
                 if (idx !== -1) player.hand.splice(idx, 1);
             });
         });
-
-        // 2. Check for U
         if (player.hand.length === 0) player.isU = true;
-
-        // 3. Automatically send cards to others
         let hasNewSends = true;
         while (hasNewSends && !player.isU) {
             let found = false;
@@ -280,32 +315,21 @@ class Room {
             }
             if (!found) hasNewSends = false;
         }
-
         if (player.hand.length === 0) player.isU = true;
-
-        // 4. Move to next player or End Game
         let nextIdx = (playerIdx + 1) % 4;
-        if (nextIdx === this.meldStartIdx || player.isU) {
-            this.endGame();
-        } else {
-            this.currentTurnIdx = nextIdx;
-            this.turnStep = 'LAY_MELDS';
-            this.broadcastUpdate();
-            this.checkBotTurn();
-        }
+        if (nextIdx === this.meldStartIdx || player.isU) { this.endGame(); }
+        else { this.currentTurnIdx = nextIdx; this.turnStep = 'LAY_MELDS'; this.broadcastUpdate(); this.checkBotTurn(); }
     }
 
     endGame() {
         this.gameStarted = false;
         if (this.botTimeout) clearTimeout(this.botTimeout);
-
         this.players.forEach(p => {
             let pPart = getBestPartitions(p.hand);
             let totalPhoms = p.melds.length + p.eaten.length;
             p.isMom = (totalPhoms === 0);
             p.score = p.isMom ? 999 : (p.isU ? 0 : pPart.score);
         });
-
         let sorted = [...this.players].sort((a, b) => {
             if (a.isU && !b.isU) return -1;
             if (!a.isU && b.isU) return 1;
@@ -314,9 +338,7 @@ class Room {
             if (a.score !== b.score) return a.score - b.score;
             return 0;
         });
-
         sorted.forEach((p, idx) => p.placement = idx + 1);
-
         let winner = sorted[0];
         if (winner.isU) {
             this.players.forEach(p => {
@@ -332,7 +354,6 @@ class Room {
                 if (sorted[3]) sorted[3].balance -= 2;
             }
         }
-
         this.dealerIdx = (this.dealerIdx + 1) % 4;
         this.broadcastGameOver();
     }
@@ -349,7 +370,6 @@ class Room {
     runBotAI() {
         const bot = this.players[this.currentTurnIdx];
         if (!bot || !bot.isBot || !this.gameStarted) return;
-
         if (this.turnStep === 'ACTION') {
             let ate = false;
             if (this.lastDiscardedCard && this.lastDiscardedPlayerIdx !== this.currentTurnIdx) {
@@ -362,6 +382,8 @@ class Room {
                         const caIds = phom.filter(c => c.id !== this.lastDiscardedCard.id).map(c => c.id);
                         bot.hand = bot.hand.filter(c => !caIds.includes(c.id));
                         bot.eaten.push([this.lastDiscardedCard, ...phom.filter(c => c.id !== this.lastDiscardedCard.id)]);
+                        this.handleEatPenalty(this.lastDiscardedPlayerIdx, this.currentTurnIdx);
+                        this.applyEatShift(this.lastDiscardedPlayerIdx);
                         this.tableDiscards[this.lastDiscardedPlayerIdx].pop();
                         this.lastDiscardedCard = null;
                         this.turnStep = 'DISCARD';
@@ -373,8 +395,7 @@ class Room {
                 if (this.drawPile.length > 0) { bot.hand.push(this.drawPile.pop()); this.turnStep = 'DISCARD'; }
                 else { this.startMeldPhase(); return; }
             }
-            this.broadcastUpdate();
-            this.checkBotTurn();
+            this.broadcastUpdate(); this.checkBotTurn();
         } else if (this.turnStep === 'DISCARD') {
             const partition = getBestPartitions(bot.hand);
             if (partition.racs.length === 0) { bot.isU = true; this.endGame(); return; }
@@ -398,19 +419,16 @@ const socketToRoom = {};
 io.on('connection', (socket) => {
     const clientId = socket.id;
     socket.emit('message', { type: 'REGISTER', payload: { clientId } });
-
     socket.on('message', (data) => {
         const { type, payload } = data;
         const roomId = socketToRoom[socket.id];
         const room = rooms[roomId];
-
         switch (type) {
             case 'CREATE_ROOM': {
                 const newId = Math.random().toString(36).substring(2, 8).toUpperCase();
                 const newRoom = new Room(newId);
                 newRoom.addPlayer(socket.id, clientId, payload.name || 'Chủ phòng');
-                rooms[newId] = newRoom;
-                socketToRoom[socket.id] = newId;
+                rooms[newId] = newRoom; socketToRoom[socket.id] = newId;
                 socket.join(newId);
                 socket.emit('message', { type: 'JOIN_SUCCESS', payload: { roomId: newId, playerCount: 1, isHost: true } });
                 break;
@@ -420,14 +438,11 @@ io.on('connection', (socket) => {
                 const r = rooms[rId];
                 if (r && r.players.length < 4) {
                     r.addPlayer(socket.id, clientId, payload.name || 'Người chơi');
-                    socketToRoom[socket.id] = rId;
-                    socket.join(rId);
+                    socketToRoom[socket.id] = rId; socket.join(rId);
                     socket.emit('message', { type: 'JOIN_SUCCESS', payload: { roomId: rId, playerCount: r.players.length, isHost: false } });
                     io.to(rId).emit('message', { type: 'PLAYER_JOINED', payload: { playerCount: r.players.length } });
                     if (r.players.length === 4) r.initGame();
-                } else {
-                    socket.emit('message', { type: 'ERROR', payload: { message: 'Phòng lỗi hoặc đã đầy.' } });
-                }
+                } else { socket.emit('message', { type: 'ERROR', payload: { message: 'Phòng lỗi hoặc đã đầy.' } }); }
                 break;
             }
             case 'ADD_BOT': {
@@ -445,7 +460,6 @@ io.on('connection', (socket) => {
                 if (pIdx !== room.currentTurnIdx) return;
                 const { action, cardId, cardIds } = payload;
                 const p = room.players[pIdx];
-
                 if (action === 'DRAW' && room.turnStep === 'ACTION') {
                     if (room.drawPile.length > 0) { p.hand.push(room.drawPile.pop()); room.turnStep = 'DISCARD'; }
                     else { room.startMeldPhase(); }
@@ -453,29 +467,28 @@ io.on('connection', (socket) => {
                     const cIdx = p.hand.findIndex(c => c.id === cardId);
                     if (cIdx !== -1) {
                         const card = p.hand.splice(cIdx, 1)[0];
-                        room.tableDiscards[pIdx].push(card);
-                        room.lastDiscardedCard = card;
-                        room.lastDiscardedPlayerIdx = pIdx;
-                        p.discardCount++;
+                        room.tableDiscards[pIdx].push(card); room.lastDiscardedCard = card;
+                        room.lastDiscardedPlayerIdx = pIdx; p.discardCount++;
                         if (getBestPartitions(p.hand).racs.length === 0) { p.isU = true; room.endGame(); return; }
                         room.nextTurn();
                     }
                 } else if (action === 'EAT' && room.turnStep === 'ACTION') {
                     if (room.lastDiscardedCard && cardIds) {
+                        const eatenCard = room.lastDiscardedCard;
                         const caCards = p.hand.filter(c => cardIds.includes(c.id));
                         if (caCards.length >= 2) {
                             p.hand = p.hand.filter(c => !cardIds.includes(c.id));
-                            p.eaten.push([room.lastDiscardedCard, ...caCards]);
+                            p.eaten.push([eatenCard, ...caCards]);
+                            room.handleEatPenalty(room.lastDiscardedPlayerIdx, pIdx);
+                            room.applyEatShift(room.lastDiscardedPlayerIdx);
                             room.tableDiscards[room.lastDiscardedPlayerIdx].pop();
-                            room.lastDiscardedCard = null;
-                            room.turnStep = 'DISCARD';
+                            room.lastDiscardedCard = null; room.turnStep = 'DISCARD';
                         }
                     }
                 } else if (action === 'LAY_MELDS' && room.turnStep === 'LAY_MELDS') {
                     room.performMeldAndSend(pIdx);
                 }
-                room.broadcastUpdate();
-                room.checkBotTurn();
+                room.broadcastUpdate(); room.checkBotTurn();
                 break;
             }
         }
