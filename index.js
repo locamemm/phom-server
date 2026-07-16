@@ -29,6 +29,70 @@ class Card {
     }
 }
 
+// --- AI LOGIC HELPERS ---
+function findAllPhoms(cards) {
+    let phoms = [];
+    for (let r = 1; r <= 13; r++) {
+        let rankCards = cards.filter(c => c.rank === r);
+        if (rankCards.length >= 3) {
+            phoms.push(rankCards);
+            if (rankCards.length === 4) {
+                for (let i = 0; i < 4; i++) {
+                    phoms.push(rankCards.filter((_, idx) => idx !== i));
+                }
+            }
+        }
+    }
+    for (let s = 0; s < 4; s++) {
+        let suitCards = cards.filter(c => c.suit === s).sort((a, b) => a.rank - b.rank);
+        for (let i = 0; i < suitCards.length; i++) {
+            for (let len = 3; len <= suitCards.length - i; len++) {
+                let sub = suitCards.slice(i, i + len);
+                let isConsec = true;
+                for (let k = 1; k < sub.length; k++) {
+                    if (sub[k].rank !== sub[k-1].rank + 1) {
+                        isConsec = false;
+                        break;
+                    }
+                }
+                if (isConsec) phoms.push(sub);
+            }
+        }
+    }
+    return phoms;
+}
+
+function getBestPartitions(cards) {
+    let allPhoms = findAllPhoms(cards);
+    let bestScore = Infinity;
+    let bestPhoms = [];
+    let bestRacs = [...cards];
+    function backtrack(index, currentPhoms, usedCardIds) {
+        let currentRacs = cards.filter(c => !usedCardIds.has(c.id));
+        let totalRubbishScore = currentRacs.reduce((sum, c) => sum + c.rank, 0);
+        let totalPhomCards = cards.length - currentRacs.length;
+        let scoreIndex = (totalPhomCards * -1000) + totalRubbishScore;
+        if (scoreIndex < bestScore) {
+            bestScore = scoreIndex;
+            bestPhoms = [...currentPhoms];
+            bestRacs = currentRacs;
+        }
+        for (let i = index; i < allPhoms.length; i++) {
+            let phom = allPhoms[i];
+            let overlap = phom.some(c => usedCardIds.has(c.id));
+            if (!overlap) {
+                phom.forEach(c => usedCardIds.add(c.id));
+                currentPhoms.push(phom);
+                backtrack(i + 1, currentPhoms, usedCardIds);
+                currentPhoms.pop();
+                phom.forEach(c => usedCardIds.delete(c.id));
+            }
+        }
+    }
+    backtrack(0, [], new Set());
+    return { phoms: bestPhoms, racs: bestRacs, score: bestRacs.reduce((sum, c) => sum + c.rank, 0) };
+}
+
 class Room {
     constructor(id) {
         this.id = id;
@@ -41,21 +105,15 @@ class Room {
         this.gameStarted = false;
         this.lastDiscardedCard = null;
         this.lastDiscardedPlayerIdx = -1;
-        this.turnStep = 'ACTION'; // 'ACTION' or 'DISCARD'
+        this.turnStep = 'ACTION';
+        this.botTimeout = null;
     }
 
     addPlayer(socketId, clientId, name, isBot = false) {
         if (this.players.length >= 4) return false;
         this.players.push({
-            socketId,
-            clientId,
-            name,
-            isBot,
-            hand: [],
-            melds: [],
-            eaten: [],
-            discards: [],
-            discardCount: 0
+            socketId, clientId, name, isBot,
+            hand: [], melds: [], eaten: [], discards: [], discardCount: 0
         });
         return true;
     }
@@ -66,6 +124,7 @@ class Room {
         this.createDeck();
         this.shuffleDeck();
         this.dealCards();
+        this.checkBotTurn();
     }
 
     createDeck() {
@@ -106,14 +165,10 @@ class Room {
         return {
             roomId: this.id,
             players: this.players.map((p) => ({
-                id: p.clientId,
-                name: p.name,
-                isBot: p.isBot,
+                id: p.clientId, name: p.name, isBot: p.isBot,
                 handCardCount: p.hand.length,
                 hand: p.clientId === clientId ? p.hand : null,
-                melds: p.melds,
-                eaten: p.eaten,
-                discards: p.discards
+                melds: p.melds, eaten: p.eaten, discards: p.discards
             })),
             tableDiscards: this.tableDiscards,
             drawPileCount: this.drawPile.length,
@@ -123,6 +178,81 @@ class Room {
             turnStep: this.turnStep
         };
     }
+
+    broadcastUpdate() {
+        this.players.forEach(p => {
+            if (p.socketId) io.to(p.socketId).emit('message', { type: 'GAME_STATE_UPDATE', payload: this.getGameState(p.clientId) });
+        });
+    }
+
+    checkBotTurn() {
+        if (!this.gameStarted) return;
+        const player = this.players[this.currentTurnIdx];
+        if (player && player.isBot) {
+            if (this.botTimeout) clearTimeout(this.botTimeout);
+            this.botTimeout = setTimeout(() => this.runBotAI(), 1500);
+        }
+    }
+
+    runBotAI() {
+        const bot = this.players[this.currentTurnIdx];
+        if (!bot || !bot.isBot) return;
+
+        if (this.turnStep === 'ACTION') {
+            // Decide to Eat or Draw
+            let ate = false;
+            if (this.lastDiscardedCard && this.lastDiscardedPlayerIdx !== this.currentTurnIdx) {
+                const testHand = [...bot.hand, this.lastDiscardedCard];
+                const withEat = getBestPartitions(testHand);
+                const withoutEat = getBestPartitions(bot.hand);
+
+                // If eating creates more phoms or significantly reduces score
+                if (withEat.phoms.length > withoutEat.phoms.length) {
+                    // Try to find which cards make the Phom
+                    const phom = withEat.phoms.find(p => p.some(c => c.id === this.lastDiscardedCard.id));
+                    if (phom) {
+                        const caIds = phom.filter(c => c.id !== this.lastDiscardedCard.id).map(c => c.id);
+                        bot.hand = bot.hand.filter(c => !caIds.includes(c.id));
+                        bot.eaten.push([this.lastDiscardedCard, ...phom.filter(c => c.id !== this.lastDiscardedCard.id)]);
+                        this.tableDiscards[this.lastDiscardedPlayerIdx].pop();
+                        this.lastDiscardedCard = null;
+                        this.turnStep = 'DISCARD';
+                        ate = true;
+                    }
+                }
+            }
+
+            if (!ate) {
+                if (this.drawPile.length > 0) {
+                    bot.hand.push(this.drawPile.pop());
+                    this.turnStep = 'DISCARD';
+                } else {
+                    // Game should end or move to meld phase, for now just skip
+                    this.currentTurnIdx = (this.currentTurnIdx + 1) % 4;
+                    this.turnStep = 'ACTION';
+                }
+            }
+            this.broadcastUpdate();
+            this.checkBotTurn(); // Run discard phase
+        } else if (this.turnStep === 'DISCARD') {
+            const partition = getBestPartitions(bot.hand);
+            const discardCard = partition.racs.length > 0
+                ? partition.racs.sort((a,b) => b.rank - a.rank)[0]
+                : bot.hand[0];
+
+            const idx = bot.hand.findIndex(c => c.id === discardCard.id);
+            bot.hand.splice(idx, 1);
+            this.tableDiscards[this.currentTurnIdx].push(discardCard);
+            this.lastDiscardedCard = discardCard;
+            this.lastDiscardedPlayerIdx = this.currentTurnIdx;
+            bot.discardCount++;
+
+            this.currentTurnIdx = (this.currentTurnIdx + 1) % 4;
+            this.turnStep = 'ACTION';
+            this.broadcastUpdate();
+            this.checkBotTurn(); // Check if next player is bot
+        }
+    }
 }
 
 const rooms = {};
@@ -131,7 +261,6 @@ const socketToRoom = {};
 io.on('connection', (socket) => {
     console.log('User connected:', socket.id);
     const clientId = socket.id;
-
     socket.emit('message', { type: 'REGISTER', payload: { clientId } });
 
     socket.on('message', (data) => {
@@ -141,113 +270,78 @@ io.on('connection', (socket) => {
 
         switch (type) {
             case 'CREATE_ROOM': {
-                const newRoomId = Math.random().toString(36).substring(2, 8).toUpperCase();
-                const newRoom = new Room(newRoomId);
+                const newId = Math.random().toString(36).substring(2, 8).toUpperCase();
+                const newRoom = new Room(newId);
                 newRoom.addPlayer(socket.id, clientId, payload.name || 'Chủ phòng');
-                rooms[newRoomId] = newRoom;
-                socketToRoom[socket.id] = newRoomId;
-                socket.join(newRoomId);
-                socket.emit('message', { type: 'JOIN_SUCCESS', payload: { roomId: newRoomId, playerCount: 1, isHost: true } });
+                rooms[newId] = newRoom;
+                socketToRoom[socket.id] = newId;
+                socket.join(newId);
+                socket.emit('message', { type: 'JOIN_SUCCESS', payload: { roomId: newId, playerCount: 1, isHost: true } });
                 break;
             }
-
             case 'JOIN_ROOM': {
-                const jRoomId = payload.roomId ? payload.roomId.toUpperCase() : '';
-                const jRoom = rooms[jRoomId];
-                if (jRoom && jRoom.players.length < 4) {
-                    jRoom.addPlayer(socket.id, clientId, payload.name || 'Người chơi');
-                    socketToRoom[socket.id] = jRoomId;
-                    socket.join(jRoomId);
-                    socket.emit('message', { type: 'JOIN_SUCCESS', payload: { roomId: jRoomId, playerCount: jRoom.players.length, isHost: false } });
-                    io.to(jRoomId).emit('message', { type: 'PLAYER_JOINED', payload: { playerCount: jRoom.players.length } });
-
-                    if (jRoom.players.length === 4) {
-                        jRoom.initGame();
-                        jRoom.players.forEach(p => {
-                            if (p.socketId) io.to(p.socketId).emit('message', { type: 'GAME_START', payload: jRoom.getGameState(p.clientId) });
-                        });
-                    }
+                const rId = payload.roomId ? payload.roomId.toUpperCase() : '';
+                const r = rooms[rId];
+                if (r && r.players.length < 4) {
+                    r.addPlayer(socket.id, clientId, payload.name || 'Người chơi');
+                    socketToRoom[socket.id] = rId;
+                    socket.join(rId);
+                    socket.emit('message', { type: 'JOIN_SUCCESS', payload: { roomId: rId, playerCount: r.players.length, isHost: false } });
+                    io.to(rId).emit('message', { type: 'PLAYER_JOINED', payload: { playerCount: r.players.length } });
+                    if (r.players.length === 4) r.initGame();
                 } else {
-                    socket.emit('message', { type: 'ERROR', payload: { message: 'Phòng không tồn tại hoặc đã đầy.' } });
+                    socket.emit('message', { type: 'ERROR', payload: { message: 'Phòng đầy hoặc không tồn tại.' } });
                 }
                 break;
             }
-
             case 'ADD_BOT': {
                 if (room && room.players.length < 4) {
                     const botNames = ['Lâm Híp', 'Bác Ba Phi', 'Chị Hoa', 'Anh Bốn'];
-                    const name = botNames[room.players.length] || `Bot ${room.players.length}`;
-                    room.addPlayer(null, `bot-${Date.now()}`, name, true);
+                    room.addPlayer(null, `bot-${Date.now()}`, botNames[room.players.length] || 'Máy', true);
                     io.to(roomId).emit('message', { type: 'PLAYER_JOINED', payload: { playerCount: room.players.length } });
-                    if (room.players.length === 4) {
-                        room.initGame();
-                        room.players.forEach(p => {
-                            if (p.socketId) io.to(p.socketId).emit('message', { type: 'GAME_START', payload: room.getGameState(p.clientId) });
-                        });
-                    }
+                    if (room.players.length === 4) room.initGame();
                 }
                 break;
             }
-
             case 'PLAYER_ACTION': {
                 if (!room) return;
-                const playerIdx = room.players.findIndex(p => p.clientId === clientId);
-                if (playerIdx !== room.currentTurnIdx) return;
-
+                const pIdx = room.players.findIndex(p => p.clientId === clientId);
+                if (pIdx !== room.currentTurnIdx) return;
                 const { action, cardId, cardIds } = payload;
-                const player = room.players[playerIdx];
+                const p = room.players[pIdx];
 
                 if (action === 'DRAW' && room.turnStep === 'ACTION') {
-                    if (room.drawPile.length > 0) {
-                        player.hand.push(room.drawPile.pop());
-                        room.turnStep = 'DISCARD';
-                    }
+                    if (room.drawPile.length > 0) { p.hand.push(room.drawPile.pop()); room.turnStep = 'DISCARD'; }
                 } else if (action === 'DISCARD' && room.turnStep === 'DISCARD') {
-                    const cIdx = player.hand.findIndex(c => c.id === cardId);
+                    const cIdx = p.hand.findIndex(c => c.id === cardId);
                     if (cIdx !== -1) {
-                        const card = player.hand.splice(cIdx, 1)[0];
-                        room.tableDiscards[playerIdx].push(card);
+                        const card = p.hand.splice(cIdx, 1)[0];
+                        room.tableDiscards[pIdx].push(card);
                         room.lastDiscardedCard = card;
-                        room.lastDiscardedPlayerIdx = playerIdx;
-                        player.discardCount++;
-
-                        // Chuyển lượt
+                        room.lastDiscardedPlayerIdx = pIdx;
+                        p.discardCount++;
                         room.currentTurnIdx = (room.currentTurnIdx + 1) % 4;
                         room.turnStep = 'ACTION';
                     }
                 } else if (action === 'EAT' && room.turnStep === 'ACTION') {
                     if (room.lastDiscardedCard && cardIds) {
-                        const eatenCard = room.lastDiscardedCard;
-                        const caCards = player.hand.filter(c => cardIds.includes(c.id));
-
+                        const caCards = p.hand.filter(c => cardIds.includes(c.id));
                         if (caCards.length >= 2) {
-                            // Xóa cạ khỏi tay
-                            player.hand = player.hand.filter(c => !cardIds.includes(c.id));
-                            // Thêm phỏm ăn vào danh sách
-                            player.eaten.push([eatenCard, ...caCards]);
-                            // Xóa bài khỏi bàn
+                            p.hand = p.hand.filter(c => !cardIds.includes(c.id));
+                            p.eaten.push([room.lastDiscardedCard, ...caCards]);
                             room.tableDiscards[room.lastDiscardedPlayerIdx].pop();
                             room.lastDiscardedCard = null;
                             room.turnStep = 'DISCARD';
                         }
                     }
                 }
-
-                // Gửi cập nhật cho mọi người
-                room.players.forEach(p => {
-                    if (p.socketId) io.to(p.socketId).emit('message', { type: 'GAME_STATE_UPDATE', payload: room.getGameState(p.clientId) });
-                });
+                room.broadcastUpdate();
+                room.checkBotTurn();
                 break;
             }
         }
     });
-
-    socket.on('disconnect', () => {
-        console.log('User disconnected:', socket.id);
-        delete socketToRoom[socket.id];
-    });
+    socket.on('disconnect', () => { delete socketToRoom[socket.id]; });
 });
 
-server.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
-});
+server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
