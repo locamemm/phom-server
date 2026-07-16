@@ -96,7 +96,7 @@ function getBestPartitions(cards) {
 }
 
 function canExtendMeld(meld, card) {
-    if (meld.length === 0) return false;
+    if (!meld || meld.length === 0) return false;
     if (meld[0].rank === card.rank) {
         let isSap = meld.every(c => c.rank === meld[0].rank);
         if (isSap && meld.length < 4) return true;
@@ -188,7 +188,6 @@ class Room {
         this.currentTurnIdx = this.dealerIdx;
         this.turnStep = this.players[this.currentTurnIdx].hand.length === 10 ? 'DISCARD' : 'ACTION';
 
-        // Kiểm tra Ù khan ngay khi chia bài
         this.players.forEach(p => {
             if (getBestPartitions(p.hand).racs.length === 0) {
                 p.isU = true;
@@ -213,6 +212,7 @@ class Room {
             currentTurnIdx: this.currentTurnIdx,
             dealerIdx: this.dealerIdx,
             lastDiscardedCard: this.lastDiscardedCard,
+            lastDiscardedPlayerIdx: this.lastDiscardedPlayerIdx,
             turnStep: this.turnStep
         };
     }
@@ -449,7 +449,8 @@ io.on('connection', (socket) => {
             case 'ADD_BOT': {
                 if (room && room.players.length < 4) {
                     const botNames = ['Lâm Híp', 'Bác Ba Phi', 'Chị Hoa', 'Anh Bốn'];
-                    room.addPlayer(null, `bot-${Date.now()}`, botNames[room.players.length] || 'Máy', true);
+                    const botId = `bot-${Date.now()}-${room.players.length}`;
+                    room.addPlayer(null, botId, botNames[room.players.length] || 'Máy', true);
                     io.to(roomId).emit('message', { type: 'PLAYER_JOINED', payload: { playerCount: room.players.length } });
                     if (room.players.length === 4) room.initGame();
                 }
