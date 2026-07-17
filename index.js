@@ -127,6 +127,7 @@ class Room {
         this.turnStep = 'ACTION';
         this.meldStartIdx = -1;
         this.botTimeout = null;
+        this.history = [];
     }
 
     addPlayer(socketId, clientId, name, isBot = false) {
@@ -230,6 +231,7 @@ class Room {
     }
 
     broadcastGameOver() {
+        console.log(`Ván đấu ${this.id} kết thúc!`);
         this.players.forEach(p => {
             if (p.socketId) io.to(p.socketId).emit('message', { type: 'GAME_OVER', payload: this.getGameState(p.clientId, true) });
         });
@@ -238,6 +240,8 @@ class Room {
     nextTurn() {
         this.currentTurnIdx = (this.currentTurnIdx + 1) % 4;
         this.turnStep = 'ACTION';
+
+        // Nếu nọc hết, người tiếp theo bắt đầu hạ phỏm
         if (this.drawPile.length === 0) {
              this.startMeldPhase();
         } else {
@@ -250,6 +254,7 @@ class Room {
         this.meldStartIdx = (this.lastDiscardedPlayerIdx + 1) % 4;
         this.currentTurnIdx = this.meldStartIdx;
         this.turnStep = 'LAY_MELDS';
+        console.log(`Bắt đầu hạ phỏm tại người chơi ${this.currentTurnIdx}`);
         this.broadcastUpdate();
         this.checkBotTurn();
     }
@@ -270,6 +275,7 @@ class Room {
 
         if (player.hand.length === 0) player.isU = true;
 
+        // Tự động gửi bài cho người khác
         let hasNewSends = true;
         while (hasNewSends && !player.isU) {
             let found = false;
@@ -306,9 +312,11 @@ class Room {
     }
 
     endGame() {
+        if (!this.gameStarted) return;
         this.gameStarted = false;
         if (this.botTimeout) clearTimeout(this.botTimeout);
 
+        // Tính toán Móm và Điểm số cuối cùng
         this.players.forEach(p => {
             let pPart = getBestPartitions(p.hand);
             let totalPhoms = p.melds.length + p.eaten.length;
@@ -316,17 +324,20 @@ class Room {
             p.score = p.isMom ? 999 : (p.isU ? 0 : pPart.score);
         });
 
+        // Xếp hạng
         let sorted = [...this.players].sort((a, b) => {
             if (a.isU && !b.isU) return -1;
             if (!a.isU && b.isU) return 1;
             if (a.isMom && !b.isMom) return 1;
             if (!a.isMom && b.isMom) return -1;
             if (a.score !== b.score) return a.score - b.score;
+            // Nếu bằng điểm, người hạ bài trước (gần meldStartIdx hơn) sẽ thắng
             return 0;
         });
 
         sorted.forEach((p, idx) => p.placement = idx + 1);
 
+        // Chốt điểm (tạm thời giữ logic cũ)
         let winner = sorted[0];
         if (winner.isU) {
             this.players.forEach(p => {
@@ -509,7 +520,14 @@ io.on('connection', (socket) => {
             }
         }
     });
-    socket.on('disconnect', () => { delete socketToRoom[socket.id]; });
+    socket.on('disconnect', () => {
+        const roomId = socketToRoom[socket.id];
+        if (rooms[roomId]) {
+            const r = rooms[roomId];
+            if (r.botTimeout) clearTimeout(r.botTimeout);
+        }
+        delete socketToRoom[socket.id];
+    });
 });
 
 server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
