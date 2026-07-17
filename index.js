@@ -475,8 +475,13 @@ io.on('connection', (socket) => {
                 const p = room.players[pIdx];
 
                 if (action === 'DRAW' && room.turnStep === 'ACTION') {
-                    if (room.drawPile.length > 0) { p.hand.push(room.drawPile.pop()); room.turnStep = 'DISCARD'; }
-                    else { room.startMeldPhase(); }
+                    if (room.drawPile.length > 0) {
+                        p.hand.push(room.drawPile.pop());
+                        room.turnStep = 'DISCARD';
+                        // Khi bốc bài, lá bài rác trước đó không còn được ăn nữa
+                        room.lastDiscardedCard = null;
+                        room.lastDiscardedPlayerIdx = -1;
+                    } else { room.startMeldPhase(); }
                 } else if (action === 'DISCARD' && room.turnStep === 'DISCARD') {
                     const cIdx = p.hand.findIndex(c => c.id === cardId);
                     if (cIdx !== -1) {
