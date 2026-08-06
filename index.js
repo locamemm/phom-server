@@ -188,7 +188,7 @@ class Room {
             hand: [], melds: [], eaten: [], discards: [], discardCount: 0,
             balance: 0, isMom: false, isU: false, score: 0, placement: 0,
             hasLaidMelds: false,
-            currentBet: 0, isFolded: false, hasActed: false, pokerResult: null
+            currentBet: 0, isFolded: false, isAllIn: false, hasActed: false, pokerResult: null
         });
         return true;
     }
@@ -243,8 +243,8 @@ class Room {
             utgIdx = (this.dealerIdx + 3) % numPlayers;
         }
 
-        const sbAmount = this.minRaise / 2;
-        const bbAmount = this.minRaise;
+        const sbAmount = this.smallBlind || 5;
+        const bbAmount = this.bigBlind || 10;
 
         this.players[sbIdx].balance -= sbAmount;
         this.players[sbIdx].currentBet = sbAmount;
@@ -268,7 +268,7 @@ class Room {
         if (pIdx !== this.currentTurnIdx) return;
 
         const player = this.players[pIdx];
-        if (player.isFolded) return;
+        if (player.isFolded || player.isAllIn) return;
 
         const { action, raiseVal } = payload;
         let actionTaken = false;
@@ -281,7 +281,11 @@ class Room {
                 }
                 break;
             case 'CALL':
-                const callAmount = this.currentBet - player.currentBet;
+                let callAmount = this.currentBet - player.currentBet;
+                if (callAmount >= player.balance) {
+                    callAmount = player.balance;
+                    player.isAllIn = true;
+                }
                 player.balance -= callAmount;
                 player.currentBet += callAmount;
                 this.pot += callAmount;
@@ -290,24 +294,33 @@ class Room {
                 break;
             case 'RAISE':
                 let raiseAmount = this.minRaise;
-                if (raiseVal === 'allin') {
+                let isAllInMode = (raiseVal === 'allin');
+
+                if (isAllInMode) {
                     raiseAmount = player.balance;
                 } else if (raiseVal) {
                     raiseAmount = parseInt(raiseVal);
                 }
 
-                const raiseTotal = this.currentBet + raiseAmount;
-                const raiseNeeded = raiseTotal - player.currentBet;
-
-                if (raiseNeeded <= player.balance) {
-                    player.balance -= raiseNeeded;
-                    player.currentBet = raiseTotal;
-                    this.currentBet = raiseTotal;
-                    this.pot += raiseNeeded;
-                    this.players.forEach(p => { if (!p.isFolded) p.hasActed = false; });
-                    player.hasActed = true;
-                    actionTaken = true;
+                if (raiseAmount >= player.balance) {
+                    raiseAmount = player.balance;
+                    player.isAllIn = true;
                 }
+
+                const newTotal = player.currentBet + raiseAmount;
+                const oldBet = this.currentBet;
+
+                player.balance -= raiseAmount;
+                player.currentBet = newTotal;
+                this.pot += raiseAmount;
+                this.currentBet = Math.max(this.currentBet, player.currentBet);
+
+                if (this.currentBet > oldBet) {
+                    this.players.forEach(p => { if (!p.isFolded && !p.isAllIn) p.hasActed = false; });
+                }
+
+                player.hasActed = true;
+                actionTaken = true;
                 break;
             case 'FOLD':
                 player.isFolded = true;
@@ -333,13 +346,14 @@ class Room {
 
         this.currentTurnIdx = (this.currentTurnIdx + 1) % numPlayers;
 
-        const allActed = activePlayers.every(p => p.hasActed);
-        const allMatched = activePlayers.every(p => p.currentBet === this.currentBet);
+        const canActPlayers = activePlayers.filter(p => !p.isAllIn);
+        const allActed = activePlayers.every(p => p.hasActed || p.isAllIn);
+        const allMatched = canActPlayers.every(p => p.currentBet === this.currentBet);
 
-        if (allActed && allMatched) {
-            this.nextPokerPhase();
+        if ((allActed && allMatched) || (canActPlayers.length <= 1 && allActed)) {
+            setTimeout(() => this.nextPokerPhase(), 1000);
         } else {
-            if (this.players[this.currentTurnIdx].isFolded) {
+            if (this.players[this.currentTurnIdx].isFolded || this.players[this.currentTurnIdx].isAllIn) {
                 this.finishPokerTurn();
             } else {
                 this.broadcastUpdate();
@@ -379,12 +393,22 @@ class Room {
             case 'RIVER': this.pokerShowdown(); return;
         }
 
+        this.broadcastUpdate();
+
+        const activePlayers = this.players.filter(p => !p.isFolded);
+        const canActPlayers = activePlayers.filter(p => !p.isAllIn);
+
+        if (canActPlayers.length <= 1) {
+            // No more betting possible, proceed automatically
+            setTimeout(() => this.nextPokerPhase(), 2000);
+            return;
+        }
+
         const numPlayers = this.players.length;
         this.currentTurnIdx = (this.dealerIdx + 1) % numPlayers;
-        if (this.players[this.currentTurnIdx].isFolded) {
+        if (this.players[this.currentTurnIdx].isFolded || this.players[this.currentTurnIdx].isAllIn) {
             this.finishPokerTurn();
         } else {
-            this.broadcastUpdate();
             if (this.players[this.currentTurnIdx].isBot) {
                 setTimeout(() => this.runBotPokerAI(), 1000);
             }
@@ -431,7 +455,7 @@ class Room {
         this.players.forEach(p => {
             p.hand = []; p.discards = []; p.eaten = []; p.melds = []; p.discardCount = 0;
             p.isMom = false; p.isU = false; p.hasLaidMelds = false;
-            p.currentBet = 0; p.isFolded = false; p.hasActed = false; p.pokerResult = null;
+            p.currentBet = 0; p.isFolded = false; p.isAllIn = false; p.hasActed = false; p.pokerResult = null;
         });
         this.drawPile = [...this.deck];
         const numPlayers = this.players.length;
@@ -493,7 +517,7 @@ class Room {
                 melds: p.melds, eaten: p.eaten, discards: p.discards,
                 balance: p.balance, isMom: p.isMom, isU: p.isU,
                 score: p.score, placement: p.placement, hasLaidMelds: p.hasLaidMelds,
-                currentBet: p.currentBet, isFolded: p.isFolded,
+                currentBet: p.currentBet, isFolded: p.isFolded, isAllIn: p.isAllIn,
                 pokerResult: isFinal ? p.pokerResult : null
             })),
             tableDiscards: this.tableDiscards,
@@ -853,6 +877,13 @@ io.on('connection', (socket) => {
                 if (room) {
                     room.gameMode = 'POKER';
                     room.pokerPhase = 'WAITING_TO_START';
+
+                    if (payload.smallBlind) room.smallBlind = payload.smallBlind;
+                    if (payload.bigBlind) {
+                        room.bigBlind = payload.bigBlind;
+                        room.minRaise = payload.bigBlind;
+                    }
+
                     if (payload.chipBalances) {
                         room.players.forEach(p => {
                             if (payload.chipBalances[p.clientId]) p.balance = payload.chipBalances[p.clientId];
