@@ -263,13 +263,14 @@ class Room {
         }, 3000);
     }
 
-    handlePokerAction(clientId, action) {
+    handlePokerAction(clientId, payload) {
         const pIdx = this.players.findIndex(p => p.clientId === clientId);
         if (pIdx !== this.currentTurnIdx) return;
 
         const player = this.players[pIdx];
         if (player.isFolded) return;
 
+        const { action, raiseVal } = payload;
         let actionTaken = false;
 
         switch (action) {
@@ -288,15 +289,25 @@ class Room {
                 actionTaken = true;
                 break;
             case 'RAISE':
-                const raiseTotal = this.currentBet + this.minRaise;
+                let raiseAmount = this.minRaise;
+                if (raiseVal === 'allin') {
+                    raiseAmount = player.balance;
+                } else if (raiseVal) {
+                    raiseAmount = parseInt(raiseVal);
+                }
+
+                const raiseTotal = this.currentBet + raiseAmount;
                 const raiseNeeded = raiseTotal - player.currentBet;
-                player.balance -= raiseNeeded;
-                player.currentBet = raiseTotal;
-                this.currentBet = raiseTotal;
-                this.pot += raiseNeeded;
-                this.players.forEach(p => { if (!p.isFolded) p.hasActed = false; });
-                player.hasActed = true;
-                actionTaken = true;
+
+                if (raiseNeeded <= player.balance) {
+                    player.balance -= raiseNeeded;
+                    player.currentBet = raiseTotal;
+                    this.currentBet = raiseTotal;
+                    this.pot += raiseNeeded;
+                    this.players.forEach(p => { if (!p.isFolded) p.hasActed = false; });
+                    player.hasActed = true;
+                    actionTaken = true;
+                }
                 break;
             case 'FOLD':
                 player.isFolded = true;
@@ -495,6 +506,7 @@ class Room {
             pokerPhase: this.pokerPhase,
             communityCards: (this.gameMode === 'POKER') ? this.communityCards : [],
             pot: this.pot,
+            currentBet: this.currentBet,
             maxPlayers: this.maxPlayers
         };
     }
@@ -834,7 +846,7 @@ io.on('connection', (socket) => {
                 break;
             }
             case 'POKER_ACTION': {
-                if (room) room.handlePokerAction(clientId, payload.action);
+                if (room) room.handlePokerAction(clientId, payload);
                 break;
             }
             case 'POKER_SETUP_COMPLETE': {
