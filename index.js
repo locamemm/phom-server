@@ -178,7 +178,9 @@ class Room {
         this.communityCards = [];
         this.currentBet = 0;
         this.pokerPhase = 'PREFLOP';
-        this.minRaise = 10000;
+        this.minRaise = 10;
+        this.smallBlind = 5;
+        this.bigBlind = 10;
     }
 
     addPlayer(socketId, clientId, name, isBot = false) {
