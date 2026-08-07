@@ -113,45 +113,96 @@ function canExtendMeld(meld, card) {
 }
 
 function evaluatePokerHand(cards) {
+    // Poker Hand Evaluator - Returns name, value and the specific 5 cards that make the hand
     const rankCounts = {};
-    const suitCounts = {};
+    const suitGroups = { 0: [], 1: [], 2: [], 3: [] };
     cards.forEach(c => {
         rankCounts[c.rank] = (rankCounts[c.rank] || 0) + 1;
-        suitCounts[c.suit] = (suitCounts[c.suit] || 0) + 1;
+        suitGroups[c.suit].push(c);
     });
 
-    const sortedRanks = Object.keys(rankCounts).map(Number).sort((a, b) => b - a);
-    const isFlush = Object.values(suitCounts).some(count => count >= 5);
-
-    let isStraight = false;
-    let straightHigh = 0;
-    let consecutive = 0;
-    const uniqueRanks = [...new Set(cards.map(c => c.rank))].sort((a, b) => a - b);
-    for (let i = 0; i < uniqueRanks.length - 1; i++) {
-        if (uniqueRanks[i + 1] === uniqueRanks[i] + 1) {
-            consecutive++;
-            if (consecutive >= 4) { isStraight = true; straightHigh = uniqueRanks[i + 1]; }
-        } else consecutive = 0;
+    // 1. Flush Check
+    let flushCards = null;
+    for (let s = 0; s < 4; s++) {
+        if (suitGroups[s].length >= 5) {
+            flushCards = suitGroups[s].sort((a, b) => b.rank - a.rank).slice(0, 5);
+            break;
+        }
     }
-    // High straight A-10-J-Q-K (Note: Ace is 1, King is 13)
-    if (!isStraight && [1, 10, 11, 12, 13].every(r => uniqueRanks.includes(r))) {
-        isStraight = true; straightHigh = 14;
+
+    // 2. Straight Check
+    let straightCards = null;
+    const uniqueCards = [];
+    const seenRanks = new Set();
+    [...cards].sort((a, b) => b.rank - a.rank).forEach(c => {
+        if (!seenRanks.has(c.rank)) {
+            uniqueCards.push(c);
+            seenRanks.add(c.rank);
+        }
+    });
+
+    // Check for normal straight
+    for (let i = 0; i <= uniqueCards.length - 5; i++) {
+        if (uniqueCards[i].rank === uniqueCards[i + 4].rank + 4) {
+            straightCards = uniqueCards.slice(i, i + 5);
+            break;
+        }
+    }
+    // Check for Wheel (A-2-3-4-5)
+    if (!straightCards && [1, 2, 3, 4, 13].every(r => seenRanks.has(r))) {
+        straightCards = uniqueCards.filter(c => [1, 2, 3, 4, 13].includes(c.rank)).sort((a, b) => a.rank - b.rank);
     }
 
     const counts = Object.entries(rankCounts).map(([rank, count]) => ({ rank: Number(rank), count }));
     counts.sort((a, b) => b.count - a.count || b.rank - a.rank);
 
-    const highCard = sortedRanks[0];
+    const getKickers = (excludeRanks, num) => {
+        return cards.filter(c => !excludeRanks.includes(c.rank))
+                    .sort((a, b) => (b.rank === 1 ? 14 : b.rank) - (a.rank === 1 ? 14 : a.rank))
+                    .slice(0, num);
+    };
 
-    if (isFlush && isStraight) return { name: "Thùng phá sảnh", value: 9000 + straightHigh };
-    if (counts[0].count === 4) return { name: "Tứ quý", value: 8000 + counts[0].rank };
-    if (counts[0].count === 3 && counts[1].count >= 2) return { name: "Cù lũ", value: 7000 + counts[0].rank };
-    if (isFlush) return { name: "Thùng", value: 6000 + highCard };
-    if (isStraight) return { name: "Sảnh", value: 5000 + straightHigh };
-    if (counts[0].count === 3) return { name: "Sám cô", value: 4000 + counts[0].rank };
-    if (counts[0].count === 2 && counts[1].count === 2) return { name: "Thú", value: 3000 + counts[0].rank };
-    if (counts[0].count === 2) return { name: "Đôi", value: 2000 + counts[0].rank };
-    return { name: "Mậu thầu", value: 1000 + highCard };
+    // Rank combinations
+    if (flushCards && straightCards) {
+        // Check if any flush group contains a straight
+        for (let s = 0; s < 4; s++) {
+            if (suitGroups[s].length >= 5) {
+                const sCards = suitGroups[s].sort((a, b) => b.rank - a.rank);
+                for (let i = 0; i <= sCards.length - 5; i++) {
+                    if (sCards[i].rank === sCards[i + 4].rank + 4) {
+                        return { name: "Thùng Phá Sảnh", value: 9000 + sCards[i].rank, bestCards: sCards.slice(i, i + 5) };
+                    }
+                }
+            }
+        }
+    }
+
+    if (counts[0].count === 4) {
+        const quadCards = cards.filter(c => c.rank === counts[0].rank);
+        return { name: "Tứ Quý", value: 8000 + counts[0].rank, bestCards: [...quadCards, ...getKickers([counts[0].rank], 1)] };
+    }
+    if (counts[0].count === 3 && (counts[1] && counts[1].count >= 2)) {
+        const trips = cards.filter(c => c.rank === counts[0].rank);
+        const pair = cards.filter(c => c.rank === counts[1].rank).slice(0, 2);
+        return { name: "Cù Lũ", value: 7000 + counts[0].rank, bestCards: [...trips, ...pair] };
+    }
+    if (flushCards) return { name: "Thùng", value: 6000, bestCards: flushCards };
+    if (straightCards) return { name: "Sảnh", value: 5000, bestCards: straightCards };
+    if (counts[0].count === 3) {
+        const trips = cards.filter(c => c.rank === counts[0].rank);
+        return { name: "Sám Cô", value: 4000 + counts[0].rank, bestCards: [...trips, ...getKickers([counts[0].rank], 2)] };
+    }
+    if (counts[0].count === 2 && (counts[1] && counts[1].count === 2)) {
+        const p1 = cards.filter(c => c.rank === counts[0].rank);
+        const p2 = cards.filter(c => c.rank === counts[1].rank);
+        return { name: "Thú", value: 3000 + counts[0].rank, bestCards: [...p1, ...p2, ...getKickers([counts[0].rank, counts[1].rank], 1)] };
+    }
+    if (counts[0].count === 2) {
+        const p = cards.filter(c => c.rank === counts[0].rank);
+        return { name: "Đôi", value: 2000 + counts[0].rank, bestCards: [...p, ...getKickers([counts[0].rank], 3)] };
+    }
+
+    return { name: "Mậu Thầu", value: 1000, bestCards: getKickers([], 5) };
 }
 
 class Room {
