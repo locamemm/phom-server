@@ -957,6 +957,37 @@ io.on('connection', (socket) => {
                 }
                 break;
             }
+            case 'KICK_PLAYER': {
+                if (room && payload.targetId) {
+                    const targetIdx = room.players.findIndex(p => p.clientId === payload.targetId);
+                    if (targetIdx !== -1) {
+                        const target = room.players[targetIdx];
+                        if (target.socketId) {
+                            io.to(target.socketId).emit('message', { type: 'ERROR', payload: { message: 'Bạn đã bị chủ phòng đuổi khỏi phòng.' } });
+                            // Force disconnect or just leave? Better to force leave room
+                        }
+                        room.players.splice(targetIdx, 1);
+
+                        const playerList = room.players.map(p => ({ id: p.clientId, name: p.name, isBot: p.isBot }));
+                        io.to(roomId).emit('message', { type: 'PLAYER_JOINED', payload: {
+                            playerCount: room.players.length,
+                            maxPlayers: room.maxPlayers,
+                            players: playerList
+                        } });
+                    }
+                }
+                break;
+            }
+            case 'SET_PLAYER_CHIP': {
+                if (room && payload.targetId) {
+                    const target = room.players.find(p => p.clientId === payload.targetId);
+                    if (target) {
+                        target.balance = parseInt(payload.amount) || 0;
+                        room.broadcastUpdate();
+                    }
+                }
+                break;
+            }
         }
     });
     socket.on('disconnect', () => {
