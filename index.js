@@ -113,110 +113,126 @@ function canExtendMeld(meld, card) {
 }
 
 function evaluatePokerHand(cards) {
-    // --- Professional Poker Hand Ranking Logic ---
-    const getVal = (r) => (Number(r) === 1 ? 14 : Number(r));
-    const rankCounts = {};
-    const suitGroups = [[], [], [], []];
-
-    cards.forEach(c => {
-        const v = getVal(c.rank);
-        rankCounts[v] = (rankCounts[v] || 0) + 1;
-        suitGroups[c.suit].push(c);
-    });
-
-    const sortedRanks = Object.keys(rankCounts).map(Number).sort((a, b) => b - a);
-    const counts = sortedRanks.map(r => ({ rank: r, count: rankCounts[r] }))
-                             .sort((a, b) => b.count - a.count || b.rank - a.rank);
-
-    const getKickers = (num, exclude = []) => {
-        return sortedRanks.filter(r => !exclude.includes(r)).slice(0, num);
-    };
-
-    let flushSuit = -1;
-    for (let s = 0; s < 4; s++) if (suitGroups[s].length >= 5) flushSuit = s;
-
-    let straightHigh = -1;
-    for (let i = 0; i <= sortedRanks.length - 5; i++) {
-        if (sortedRanks[i] === sortedRanks[i+4] + 4) { straightHigh = sortedRanks[i]; break; }
-    }
-    if (straightHigh === -1 && [14, 5, 4, 3, 2].every(r => rankCounts[r])) straightHigh = 5;
-
-    // 1. Straight Flush
-    if (flushSuit !== -1) {
-        const fUnique = [...new Set(suitGroups[flushSuit].map(c => getVal(c.rank)))].sort((a, b) => b - a);
-        let sfHigh = -1;
-        for (let i = 0; i <= fUnique.length - 5; i++) {
-            if (fUnique[i] === fUnique[i+4] + 4) { sfHigh = fUnique[i]; break; }
+    // --- Robust Poker Hand Evaluator ---
+    try {
+        if (!cards || !Array.isArray(cards) || cards.length === 0) {
+            return { name: "Mậu Thầu", value: 1, bestCards: [], tieBreakers: [0, 0, 0, 0, 0] };
         }
-        if (sfHigh === -1 && [14, 5, 4, 3, 2].every(r => fUnique.includes(r))) sfHigh = 5;
-        if (sfHigh !== -1) {
-            const bestSF = (sfHigh === 5)
-                ? cards.filter(c => [14, 5, 4, 3, 2].includes(getVal(c.rank)) && c.suit === flushSuit).sort((a,b) => getVal(b.rank) - getVal(a.rank))
-                : cards.filter(c => getVal(c.rank) <= sfHigh && getVal(c.rank) >= sfHigh - 4 && c.suit === flushSuit).sort((a,b) => getVal(b.rank) - getVal(a.rank));
-            return { name: "Thùng Phá Sảnh", value: 9, bestCards: bestSF, tieBreakers: [sfHigh] };
+
+        const getVal = (r) => {
+            const val = Number(r);
+            return (val === 1 ? 14 : val);
+        };
+        const rankCounts = {};
+        const suitGroups = [[], [], [], []];
+
+        for (const c of cards) {
+            if (!c || c.rank === undefined) continue;
+            const v = getVal(c.rank);
+            rankCounts[v] = (rankCounts[v] || 0) + 1;
+            if (c.suit >= 0 && c.suit <= 3) suitGroups[c.suit].push(c);
         }
-    }
 
-    // 2. 4 of a Kind
-    if (counts[0].count === 4) {
-        const main = cards.filter(c => getVal(c.rank) === counts[0].rank);
-        const kick = getKickers(1, [counts[0].rank]);
-        const kickObjs = cards.filter(c => getVal(c.rank) === kick[0]).slice(0, 1);
-        return { name: "Tứ Quý", value: 8, bestCards: [...main, ...kickObjs], tieBreakers: [counts[0].rank, kick[0]] };
-    }
+        const sortedRanks = Object.keys(rankCounts).map(Number).sort((a, b) => b - a);
+        if (sortedRanks.length === 0) {
+            return { name: "Mậu Thầu", value: 1, bestCards: [], tieBreakers: [0, 0, 0, 0, 0] };
+        }
+        const counts = sortedRanks.map(r => ({ rank: r, count: rankCounts[r] }))
+                                 .sort((a, b) => b.count - a.count || b.rank - a.rank);
 
-    // 3. Full House
-    if (counts[0].count === 3 && counts[1] && counts[1].count >= 2) {
-        const trips = cards.filter(c => getVal(c.rank) === counts[0].rank);
-        const pair = cards.filter(c => getVal(c.rank) === counts[1].rank).slice(0, 2);
-        return { name: "Cù Lũ", value: 7, bestCards: [...trips, ...pair], tieBreakers: [counts[0].rank, counts[1].rank] };
-    }
+        const getKickers = (num, exclude = []) => {
+            return sortedRanks.filter(r => !exclude.includes(r)).slice(0, num);
+        };
 
-    // 4. Flush
-    if (flushSuit !== -1) {
-        const fCards = suitGroups[flushSuit].sort((a,b) => getVal(b.rank) - getVal(a.rank)).slice(0, 5);
-        return { name: "Thùng", value: 6, bestCards: fCards, tieBreakers: fCards.map(c => getVal(c.rank)) };
-    }
+        let flushSuit = -1;
+        for (let s = 0; s < 4; s++) if (suitGroups[s].length >= 5) flushSuit = s;
 
-    // 5. Straight
-    if (straightHigh !== -1) {
-        const sCards = (straightHigh === 5)
-            ? cards.filter(c => [14, 5, 4, 3, 2].includes(getVal(c.rank))).sort((a, b) => getVal(b.rank) - getVal(a.rank)).slice(0, 5)
-            : cards.filter(c => getVal(c.rank) <= straightHigh && getVal(c.rank) >= straightHigh - 4).sort((a, b) => getVal(b.rank) - getVal(a.rank)).slice(0, 5);
-        return { name: "Sảnh", value: 5, bestCards: sCards, tieBreakers: [straightHigh] };
-    }
+        let straightHigh = -1;
+        for (let i = 0; i <= sortedRanks.length - 5; i++) {
+            if (sortedRanks[i] === sortedRanks[i + 4] + 4) { straightHigh = sortedRanks[i]; break; }
+        }
+        if (straightHigh === -1 && [14, 5, 4, 3, 2].every(r => rankCounts[r])) straightHigh = 5;
 
-    // 6. 3 of a Kind
-    if (counts[0].count === 3) {
-        const trips = cards.filter(c => getVal(c.rank) === counts[0].rank);
-        const kick = getKickers(2, [counts[0].rank]);
-        const kickObjs = cards.filter(c => kick.includes(getVal(c.rank))).sort((a,b) => getVal(b.rank) - getVal(a.rank)).slice(0, 2);
-        return { name: "Sám Cô", value: 4, bestCards: [...trips, ...kickObjs], tieBreakers: [counts[0].rank, ...kick] };
-    }
+        // 1. Straight Flush
+        if (flushSuit !== -1) {
+            const fUnique = [...new Set(suitGroups[flushSuit].map(c => getVal(c.rank)))].sort((a, b) => b - a);
+            let sfHigh = -1;
+            for (let i = 0; i <= fUnique.length - 5; i++) {
+                if (fUnique[i] === fUnique[i + 4] + 4) { sfHigh = fUnique[i]; break; }
+            }
+            if (sfHigh === -1 && [14, 5, 4, 3, 2].every(r => fUnique.includes(r))) sfHigh = 5;
+            if (sfHigh !== -1) {
+                const bestSF = (sfHigh === 5)
+                    ? cards.filter(c => [14, 5, 4, 3, 2].includes(getVal(c.rank)) && c.suit === flushSuit).sort((a, b) => getVal(b.rank) - getVal(a.rank))
+                    : cards.filter(c => getVal(c.rank) <= sfHigh && getVal(c.rank) >= sfHigh - 4 && c.suit === flushSuit).sort((a, b) => getVal(b.rank) - getVal(a.rank));
+                return { name: "Thùng Phá Sảnh", value: 9, bestCards: bestSF, tieBreakers: [sfHigh] };
+            }
+        }
 
-    // 7. 2 Pair
-    if (counts[0].count === 2 && counts[1] && counts[1].count === 2) {
-        const h = counts[0].rank;
-        const l = counts[1].rank;
-        const p1 = cards.filter(c => getVal(c.rank) === h);
-        const p2 = cards.filter(c => getVal(c.rank) === l);
-        const kick = getKickers(1, [h, l]);
-        const kickObjs = cards.filter(c => getVal(c.rank) === kick[0]).slice(0, 1);
-        return { name: "Thú", value: 3, bestCards: [...p1, ...p2, ...kickObjs], tieBreakers: [h, l, kick[0]] };
-    }
+        // 2. 4 of a Kind
+        if (counts[0].count === 4) {
+            const main = cards.filter(c => getVal(c.rank) === counts[0].rank);
+            const kick = getKickers(1, [counts[0].rank]);
+            const kickObjs = cards.filter(c => getVal(c.rank) === kick[0]).slice(0, 1);
+            return { name: "Tứ Quý", value: 8, bestCards: [...main, ...kickObjs], tieBreakers: [counts[0].rank, kick[0]] };
+        }
 
-    // 8. Pair
-    if (counts[0].count === 2) {
-        const pair = cards.filter(c => getVal(c.rank) === counts[0].rank);
-        const kick = getKickers(3, [counts[0].rank]);
-        const kickObjs = cards.filter(c => kick.includes(getVal(c.rank))).sort((a,b) => getVal(b.rank) - getVal(a.rank)).slice(0, 3);
-        return { name: "Đôi", value: 2, bestCards: [...pair, ...kickObjs], tieBreakers: [counts[0].rank, ...kick] };
-    }
+        // 3. Full House
+        if (counts[0].count === 3 && counts[1] && counts[1].count >= 2) {
+            const trips = cards.filter(c => getVal(c.rank) === counts[0].rank);
+            const pair = cards.filter(c => getVal(c.rank) === counts[1].rank).slice(0, 2);
+            return { name: "Cù Lũ", value: 7, bestCards: [...trips, ...pair], tieBreakers: [counts[0].rank, counts[1].rank] };
+        }
 
-    // 9. High Card
-    const top5 = sortedRanks.slice(0, 5);
-    const top5Cards = cards.filter(c => top5.includes(getVal(c.rank))).sort((a,b) => getVal(b.rank) - getVal(a.rank)).slice(0, 5);
-    return { name: "Mậu Thầu", value: 1, bestCards: top5Cards, tieBreakers: top5 };
+        // 4. Flush
+        if (flushSuit !== -1) {
+            const fCards = suitGroups[flushSuit].sort((a, b) => getVal(b.rank) - getVal(a.rank)).slice(0, 5);
+            return { name: "Thùng", value: 6, bestCards: fCards, tieBreakers: fCards.map(c => getVal(c.rank)) };
+        }
+
+        // 5. Straight
+        if (straightHigh !== -1) {
+            const sCards = (straightHigh === 5)
+                ? cards.filter(c => [14, 5, 4, 3, 2].includes(getVal(c.rank))).sort((a, b) => getVal(b.rank) - getVal(a.rank)).slice(0, 5)
+                : cards.filter(c => getVal(c.rank) <= straightHigh && getVal(c.rank) >= straightHigh - 4).sort((a, b) => getVal(b.rank) - getVal(a.rank)).slice(0, 5);
+            return { name: "Sảnh", value: 5, bestCards: sCards, tieBreakers: [straightHigh] };
+        }
+
+        // 6. 3 of a Kind
+        if (counts[0].count === 3) {
+            const trips = cards.filter(c => getVal(c.rank) === counts[0].rank);
+            const kick = getKickers(2, [counts[0].rank]);
+            const kickObjs = cards.filter(c => kick.includes(getVal(c.rank))).sort((a, b) => getVal(b.rank) - getVal(a.rank)).slice(0, 2);
+            return { name: "Sám Cô", value: 4, bestCards: [...trips, ...kickObjs], tieBreakers: [counts[0].rank, ...kick] };
+        }
+
+        // 7. 2 Pair
+        if (counts[0].count === 2 && counts[1] && counts[1].count === 2) {
+            const h = counts[0].rank;
+            const l = counts[1].rank;
+            const p1 = cards.filter(c => getVal(c.rank) === h);
+            const p2 = cards.filter(c => getVal(c.rank) === l);
+            const kick = getKickers(1, [h, l]);
+            const kickObjs = cards.filter(c => getVal(c.rank) === kick[0]).slice(0, 1);
+            return { name: "Thú", value: 3, bestCards: [...p1, ...p2, ...kickObjs], tieBreakers: [h, l, kick[0]] };
+        }
+
+        // 8. Pair
+        if (counts[0].count === 2) {
+            const pair = cards.filter(c => getVal(c.rank) === counts[0].rank);
+            const kick = getKickers(3, [counts[0].rank]);
+            const kickObjs = cards.filter(c => kick.includes(getVal(c.rank))).sort((a, b) => getVal(b.rank) - getVal(a.rank)).slice(0, 3);
+            return { name: "Đôi", value: 2, bestCards: [...pair, ...kickObjs], tieBreakers: [counts[0].rank, ...kick] };
+        }
+
+        // 9. High Card
+        const top5 = sortedRanks.slice(0, 5);
+        const top5Cards = cards.filter(c => top5.includes(getVal(c.rank))).sort((a, b) => getVal(b.rank) - getVal(a.rank)).slice(0, 5);
+        return { name: "Mậu Thầu", value: 1, bestCards: top5Cards, tieBreakers: top5 };
+    } catch (e) {
+        console.error("Evaluation error:", e);
+        return { name: "Mậu Thầu", value: 1, bestCards: [], tieBreakers: [0, 0, 0, 0, 0] };
+    }
 }
 
 class Room {
@@ -255,7 +271,7 @@ class Room {
             hand: [], melds: [], eaten: [], discards: [], discardCount: 0,
             balance: 0, isMom: false, isU: false, score: 0, placement: 0,
             hasLaidMelds: false,
-            currentBet: 0, isFolded: false, isAllIn: false, hasActed: false, pokerResult: null
+            currentBet: 0, totalContribution: 0, isFolded: false, isAllIn: false, hasActed: false, pokerResult: null
         });
         return true;
     }
@@ -283,7 +299,7 @@ class Room {
     initPokerGame() {
         this.gameStarted = true;
         this.players.forEach(p => {
-            p.hand = []; p.currentBet = 0; p.isFolded = false; p.hasActed = false; p.pokerResult = null;
+            p.hand = []; p.currentBet = 0; p.totalContribution = 0; p.isFolded = false; p.isAllIn = false; p.hasActed = false; p.pokerResult = null;
         });
         this.pot = 0;
         this.communityCards = [];
@@ -315,8 +331,10 @@ class Room {
 
         this.players[sbIdx].balance -= sbAmount;
         this.players[sbIdx].currentBet = sbAmount;
+        this.players[sbIdx].totalContribution = sbAmount;
         this.players[bbIdx].balance -= bbAmount;
         this.players[bbIdx].currentBet = bbAmount;
+        this.players[bbIdx].totalContribution = bbAmount;
         this.currentBet = bbAmount;
         this.pot = sbAmount + bbAmount;
 
@@ -340,7 +358,7 @@ class Room {
         const { action, raiseVal } = payload;
         let actionTaken = false;
 
-        switch (action) {
+        switch(action) {
             case 'CHECK':
                 if (player.currentBet === this.currentBet) {
                     player.hasActed = true;
@@ -355,6 +373,7 @@ class Room {
                 }
                 player.balance -= callAmount;
                 player.currentBet += callAmount;
+                player.totalContribution += callAmount;
                 this.pot += callAmount;
                 player.hasActed = true;
                 actionTaken = true;
@@ -379,6 +398,7 @@ class Room {
 
                 player.balance -= raiseAmount;
                 player.currentBet = newTotal;
+                player.totalContribution += raiseAmount;
                 this.pot += raiseAmount;
                 this.currentBet = Math.max(this.currentBet, player.currentBet);
 
@@ -406,12 +426,19 @@ class Room {
         const numPlayers = this.players.length;
 
         if (activePlayers.length === 1) {
-            activePlayers[0].balance += this.pot;
+            this.distributePokerPot(activePlayers);
             this.endPokerGame();
             return;
         }
 
-        this.currentTurnIdx = (this.currentTurnIdx + 1) % numPlayers;
+        // Use while loop with safety counter to find next active player
+        let nextIdx = (this.currentTurnIdx + 1) % numPlayers;
+        let loopCount = 0;
+        while ((this.players[nextIdx].isFolded || this.players[nextIdx].isAllIn) && loopCount < numPlayers) {
+            nextIdx = (nextIdx + 1) % numPlayers;
+            loopCount++;
+        }
+        this.currentTurnIdx = nextIdx;
 
         const canActPlayers = activePlayers.filter(p => !p.isAllIn);
         const allActed = activePlayers.every(p => p.hasActed || p.isAllIn);
@@ -420,14 +447,134 @@ class Room {
         if ((allActed && allMatched) || (canActPlayers.length <= 1 && allActed)) {
             setTimeout(() => this.nextPokerPhase(), 1000);
         } else {
-            if (this.players[this.currentTurnIdx].isFolded || this.players[this.currentTurnIdx].isAllIn) {
-                this.finishPokerTurn();
-            } else {
+            const nextPlayer = this.players[this.currentTurnIdx];
+            if (!nextPlayer.isFolded && !nextPlayer.isAllIn) {
                 this.broadcastUpdate();
-                if (this.players[this.currentTurnIdx].isBot) {
+                if (nextPlayer.isBot) {
                     setTimeout(() => this.runBotPokerAI(), 1000);
                 }
+            } else {
+                // If no more players can act, move to next phase
+                setTimeout(() => this.nextPokerPhase(), 1000);
             }
+        }
+    }
+
+    distributePokerPot(remainingPlayers) {
+        // --- Robust Professional Side Pot Logic ---
+        try {
+            if (!remainingPlayers || remainingPlayers.length === 0) return;
+            this.pot = Number(this.pot) || 0;
+            if (this.pot <= 0) return;
+
+            // 1. Return uncalled bets
+            const allConts = this.players.map(p => ({ p, amount: Number(p.totalContribution || 0) }))
+                                         .filter(c => c.amount > 0)
+                                         .sort((a, b) => b.amount - a.amount);
+
+            if (allConts.length >= 2 && allConts[0].amount > allConts[1].amount) {
+                const refund = allConts[0].amount - allConts[1].amount;
+                allConts[0].p.balance = Number(allConts[0].p.balance) + refund;
+                this.pot = Number(this.pot) - refund;
+
+                // Notification for refund
+                io.to(this.id).emit('message', {
+                    type: 'FLOATING_TEXT',
+                    payload: { clientId: allConts[0].p.clientId, text: `Hoàn trả ${refund} Chip từ Pot`, isGreen: true }
+                });
+                // Update source data for tiered calculation
+                allConts[0].p.totalContribution = allConts[1].amount;
+            } else if (allConts.length === 1) {
+                const refund = allConts[0].amount;
+                allConts[0].p.balance = Number(allConts[0].p.balance) + refund;
+                this.pot = 0;
+                return;
+            }
+
+            // 2. Pre-evaluate hands
+            for (const p of remainingPlayers) {
+                if (!p.pokerResult) {
+                    const fullHand = [...(p.hand || []), ...(this.communityCards || [])];
+                    p.pokerResult = evaluatePokerHand(fullHand);
+                }
+            }
+
+            // 3. Side Pot Calculation
+            const tiers = [...new Set(this.players.map(p => Number(p.totalContribution || 0)))]
+                            .filter(a => a > 0)
+                            .sort((a, b) => a - b);
+
+            let prevTierLimit = 0;
+            let potRemaining = Number(this.pot);
+            let tierSafety = 0;
+
+            for (const tierLimit of tiers) {
+                tierSafety++;
+                if (tierSafety > 20) break; // Extreme safety
+
+                const tierHeight = tierLimit - prevTierLimit;
+                if (tierHeight <= 0) continue;
+
+                const contributors = this.players.filter(p => Number(p.totalContribution || 0) >= tierLimit);
+                const tierPotSize = Math.min(potRemaining, contributors.length * tierHeight);
+                const eligiblePlayers = contributors.filter(p => remainingPlayers.includes(p));
+
+                if (eligiblePlayers.length > 0 && tierPotSize > 0) {
+                    eligiblePlayers.sort((a, b) => {
+                        const resA = a.pokerResult || { value: 0, tieBreakers: [] };
+                        const resB = b.pokerResult || { value: 0, tieBreakers: [] };
+                        if (resB.value !== resA.value) return resB.value - resA.value;
+                        const tbA = resA.tieBreakers || [];
+                        const tbB = resB.tieBreakers || [];
+                        const len = Math.max(tbA.length, tbB.length);
+                        for (let i = 0; i < len; i++) {
+                            const valA = tbA[i] || 0;
+                            const valB = tbB[i] || 0;
+                            if (valB !== valA) return valB - valA;
+                        }
+                        return 0;
+                    });
+
+                    const best = eligiblePlayers[0].pokerResult || { value: 0, tieBreakers: [] };
+                    const winners = eligiblePlayers.filter(p => {
+                        const res = p.pokerResult;
+                        if (!res) return false;
+                        if (res.value !== best.value) return false;
+                        const tbA = res.tieBreakers || [];
+                        const tbB = best.tieBreakers || [];
+                        if (tbA.length !== tbB.length) return false;
+                        return tbA.every((v, i) => v === tbB[i]);
+                    });
+
+                    const share = Math.floor(tierPotSize / winners.length);
+                    for (const w of winners) {
+                        w.balance = Number(w.balance) + share;
+                        io.to(this.id).emit('message', {
+                            type: 'FLOATING_TEXT',
+                            payload: { clientId: w.clientId, text: `+${share} Chip`, isGreen: true }
+                        });
+                    }
+                    if (tierPotSize % winners.length !== 0) {
+                        winners[0].balance = Number(winners[0].balance) + (tierPotSize % winners.length);
+                    }
+                } else if (tierPotSize > 0) {
+                    if (remainingPlayers[0]) {
+                        remainingPlayers[0].balance = Number(remainingPlayers[0].balance) + tierPotSize;
+                        io.to(this.id).emit('message', {
+                            type: 'FLOATING_TEXT',
+                            payload: { clientId: remainingPlayers[0].clientId, text: `+${tierPotSize} Chip`, isGreen: true }
+                        });
+                    }
+                }
+
+                potRemaining -= tierPotSize;
+                prevTierLimit = tierLimit;
+                if (potRemaining <= 0) break;
+            }
+        } catch (e) {
+            console.error("Error in distributePokerPot (Server):", e);
+        } finally {
+            this.pot = 0;
         }
     }
 
@@ -446,7 +593,7 @@ class Room {
             else action = 'CHECK';
         }
 
-        this.handlePokerAction(bot.clientId, action);
+        this.handlePokerAction(bot.clientId, { action });
     }
 
     nextPokerPhase() {
@@ -467,54 +614,38 @@ class Room {
 
         if (canActPlayers.length <= 1) {
             // No more betting possible, proceed automatically
-            setTimeout(() => this.nextPokerPhase(), 2000);
+            if (this.pokerPhase !== 'SHOWDOWN') {
+                setTimeout(() => this.nextPokerPhase(), 2000);
+            }
             return;
         }
 
         const numPlayers = this.players.length;
         this.currentTurnIdx = (this.dealerIdx + 1) % numPlayers;
-        if (this.players[this.currentTurnIdx].isFolded || this.players[this.currentTurnIdx].isAllIn) {
-            this.finishPokerTurn();
-        } else {
-            if (this.players[this.currentTurnIdx].isBot) {
+
+        // Skip folded/all-in players for the first action of the new phase
+        let loopCount = 0;
+        while ((this.players[this.currentTurnIdx].isFolded || this.players[this.currentTurnIdx].isAllIn) && loopCount < numPlayers) {
+            this.currentTurnIdx = (this.currentTurnIdx + 1) % numPlayers;
+            loopCount++;
+        }
+
+        const firstPlayer = this.players[this.currentTurnIdx];
+        if (!firstPlayer.isFolded && !firstPlayer.isAllIn) {
+            if (firstPlayer.isBot) {
                 setTimeout(() => this.runBotPokerAI(), 1000);
+            }
+        } else {
+            // Fallback: if no active player found, proceed to next phase
+            if (this.pokerPhase !== 'SHOWDOWN') {
+                setTimeout(() => this.nextPokerPhase(), 1000);
             }
         }
     }
 
     pokerShowdown() {
         const activePlayers = this.players.filter(p => !p.isFolded);
-        activePlayers.forEach(p => {
-            p.pokerResult = evaluatePokerHand([...p.hand, ...this.communityCards]);
-        });
-
-        // Sort by hand rank, then by tie-breakers
-        activePlayers.sort((a, b) => {
-            if (b.pokerResult.value !== a.pokerResult.value) {
-                return b.pokerResult.value - a.pokerResult.value;
-            }
-            const len = Math.max(a.pokerResult.tieBreakers.length, b.pokerResult.tieBreakers.length);
-            for (let i = 0; i < len; i++) {
-                const valA = a.pokerResult.tieBreakers[i] || 0;
-                const valB = b.pokerResult.tieBreakers[i] || 0;
-                if (valB !== valA) return valB - valA;
-            }
-            return 0;
-        });
-
-        // Identify all winners
-        const best = activePlayers[0].pokerResult;
-        const winners = activePlayers.filter(p => {
-            const res = p.pokerResult;
-            if (res.value !== best.value) return false;
-            if (res.tieBreakers.length !== best.tieBreakers.length) return false;
-            return res.tieBreakers.every((v, i) => v === best.tieBreakers[i]);
-        });
-
-        const share = Math.floor(this.pot / winners.length);
-        winners.forEach(w => w.balance += share);
-        if (this.pot % winners.length !== 0) winners[0].balance += (this.pot % winners.length);
-
+        this.distributePokerPot(activePlayers);
         this.pokerPhase = 'SHOWDOWN';
         this.endPokerGame();
     }
